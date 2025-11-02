@@ -63,7 +63,7 @@ def is_barcode(text: str) -> bool:
 
 
 @loader.tds
-class BarcodeLangModd(loader.Module):
+class BarcodeLangMod(loader.Module):
     """Порт шрихкодового языка от h_m_256.t.me 🙏🙏🙏. Автор оригинала: @roflplugins"""
 
     strings = {
