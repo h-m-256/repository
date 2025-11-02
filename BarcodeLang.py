@@ -1,4 +1,4 @@
-# meta developer: @h_m_256 && @RoflPlugins
+# meta developer: h_m_256.t.me && @RoflPlugins
 # meta banner: https://i.imgur.com/barcode.jpg
 
 from .. import loader, utils
@@ -64,7 +64,7 @@ def is_barcode(text: str) -> bool:
 
 @loader.tds
 class BarcodeLangMod(loader.Module):
-    """порт шрихкодового языка от @h_m_256 🙏🙏🙏🙏🙏🙏🙏🙏🙏🙏, оригинал @roflplugins"""
+    """порт шрихкодового языка от h_m_256.t.me 🙏🙏🙏🙏🙏🙏🙏🙏🙏🙏, оригинал @roflplugins"""
 
     strings = {
         "name": "BarcodeLang",
