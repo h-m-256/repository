@@ -1,5 +1,5 @@
 #meta developer: @h_m_256
-#есть вайбкод
+#🔑 копурайт геймини 3 флеш/про
 
 import asyncio
 import aiohttp
@@ -14,7 +14,7 @@ from ..inline.types import InlineCall
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """генерация/редактирование изображений через модели google"""
+    """AI Image Generation & History with Google Models"""
 
     strings = {
         "name": "ImageGen",
@@ -80,7 +80,7 @@ class ImageGenMod(loader.Module):
         """Generate/Edit image"""
         args = utils.get_args_raw(message)
         reply = await message.get_reply_message()
-        photo = await message.download_media(bytes) if message.photo else (await reply.download_media(bytes) if reply and reply.photo else None)
+        photo = await (message.download_media(bytes) if message.photo else (reply.download_media(bytes) if reply and reply.photo else None))
 
         if not args and not photo: return await utils.answer(message, self.strings("usage"))
         if not self.config["api_key"]: return await utils.answer(message, self.strings("no_api"))
@@ -109,24 +109,51 @@ class ImageGenMod(loader.Module):
     async def _render(self, message, sid, status_msg=None):
         history = self.db.get("ImageGen", "history", [])
         sess = next((i for i in history if i["id"] == sid), None)
-        if not sess: return
+        
+        target = status_msg or message
+
+        if not sess:
+            err = self.strings("error").format("Session not found")
+            return await (target.edit(err) if hasattr(target, 'edit') else utils.answer(message, err))
 
         try:
-            img_b64 = sess["data"]["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-            file = io.BytesIO(base64.b64decode(img_b64))
-            file.name = "ai.png" # Важно для корректной работы inline.form
+            img_b64 = None
+            candidates = sess.get("data", {}).get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                for p in parts:
+                    if "inlineData" in p:
+                        img_b64 = p["inlineData"].get("data")
+                        break
             
-            kb = [[{"text": "🔄 Regenerate", "callback": self._regen_cb, "args": (sid,)}]]
+            if not img_b64:
+                raise KeyError("No inlineData found")
+
+            file = io.BytesIO(base64.b64decode(img_b64))
+            file.name = "ai.png"
+            
+            kb = [
+                [{"text": "🔄 Regenerate", "callback": self._regen_cb, "args": (sid,)}],
+                [{"text": "🗑 Удалить", "callback": self._del_cb, "args": (sid,)}]
+            ]
             
             if status_msg: await status_msg.delete()
+            
             await self.inline.form(self.strings("success").format(sess["prompt"]), message=message, file=file, reply_markup=kb)
-        except Exception as e:
-            err_msg = self.strings("error").format("No image data. Safety filter?")
-            if status_msg: await status_msg.edit(err_msg)
-            else: await message.edit(err_msg)
+            
+        except Exception:
+            err_msg = self.strings("error").format("No image data in response. Content might be filtered.")
+            if hasattr(target, 'edit'): await target.edit(err_msg)
+            else: await utils.answer(message, err_msg)
 
     async def _hist_cb(self, call: InlineCall, sid):
         await self._render(call.message, sid)
+
+    async def _del_cb(self, call: InlineCall, sid):
+        history = self.db.get("ImageGen", "history", [])
+        history = [i for i in history if i["id"] != sid]
+        self.db.set("ImageGen", "history", history)
+        await call.delete()
 
     async def _regen_cb(self, call: InlineCall, sid):
         history = self.db.get("ImageGen", "history", [])
@@ -135,7 +162,8 @@ class ImageGenMod(loader.Module):
 
         await call.answer("Regenerating...")
         try:
-            photo = base64.b64decode(history[idx]["photo"]) if history[idx]["photo"] else None
+            photo_raw = history[idx].get("photo")
+            photo = base64.b64decode(photo_raw) if photo_raw else None
             new_data = await self._call_api(history[idx]["prompt"], photo)
             history[idx]["data"] = new_data
             self.db.set("ImageGen", "history", history)
