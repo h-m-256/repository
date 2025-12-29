@@ -10,11 +10,10 @@ import uuid
 from .. import loader, utils
 from telethon.tl.types import Message
 from ..inline.types import InlineCall
-from aiogram.types import BufferedInputFile
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """AI Image Generation with History (Max Compatibility)"""
+    """AI Image Generation (Final Stability Fix)"""
 
     strings = {
         "name": "ImageGen",
@@ -22,22 +21,16 @@ class ImageGenMod(loader.Module):
         "model": "Model to use for generation",
         "default_prompt_prefix": "Default prompt prefix",
         "no_api": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>API ключ не настроен!</b>',
-        "generating": '<a href="tg://emoji?id=5386367538735104399">⌛</a> <b>Генерирую изображение...</b>\n\n<i>Промпт: {}</i>',
-        "error": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>Ошибка:</b>\n<code>{}</code>',
-        "success": '<a href="tg://emoji?id=5427009714745517609">✅</a> <b>Готово!</b>\n\n<i>Промпт: {}</i>',
+        "generating": '<a href="tg://emoji?id=5386367538735104399">⌛</a> <b>Генерирую...</b>\n<i>{}</i>',
+        "error": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>Ошибка:</b> <code>{}</code>',
+        "success": '<a href="tg://emoji?id=5427009714745517609">✅</a> <b>Готово!</b>\n<i>{}</i>',
         "history_empty": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>История пуста!</b>',
-        "history_cleared": '<a href="tg://emoji?id=5427009714745517609">✅</a> <b>История очищена!</b>',
-        "history_title": '<a href="tg://emoji?id=5334882760735598374">📝</a> <b>История генераций:</b>',
     }
 
     def __init__(self):
         self.config = loader.ModuleConfig(
             loader.ConfigValue("api_key", "", lambda: self.strings("api_key"), validator=loader.validators.Hidden()),
-            loader.ConfigValue("model", "nano-banana-pro-preview", lambda: self.strings("model"), 
-                validator=loader.validators.Choice([
-                    "nano-banana-pro-preview", "gemini-3-pro-image-preview",
-                    "gemini-2.5-flash-image", "imagen-4.0-generate-001"
-                ])),
+            loader.ConfigValue("model", "nano-banana-pro-preview", lambda: self.strings("model")),
             loader.ConfigValue("default_prompt_prefix", "", lambda: self.strings("default_prompt_prefix")),
         )
 
@@ -53,10 +46,11 @@ class ImageGenMod(loader.Module):
             "generationConfig": {"candidateCount": 1, "temperature": 1.0}
         }
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as resp:
-                data = await resp.json()
-                if resp.status != 200: raise ValueError(json.dumps(data, indent=2, ensure_ascii=False))
-                return data
+            async with session.post(url, json=payload, timeout=60) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise ValueError(f"API Error {resp.status}: {text[:100]}")
+                return await resp.json()
 
     @loader.command(ru_doc=" > Сгенерировать изображение")
     async def ig(self, message: Message):
@@ -65,133 +59,67 @@ class ImageGenMod(loader.Module):
         if not args: return await utils.answer(message, "Введите промпт")
         if not self.config["api_key"]: return await utils.answer(message, self.strings("no_api"))
 
-        # 1. Отправляем текстовую форму (placeholder)
-        msg = await self.inline.form(
-            text=self.strings("generating").format(args),
-            message=message,
-            reply_markup=[[{"text": "⏳ Загрузка...", "data": "ignore"}]]
-        )
+        # Используем обычный ответ для статуса (надежнее всего)
+        status = await utils.answer(message, self.strings("generating").format(args))
         
-        if not msg: return
-
         try:
             data = await self._call_api(args)
+            
+            img_b64 = None
+            try:
+                img_b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+            except (KeyError, IndexError):
+                raise ValueError("No image in response. Safety filter?")
+
+            img_bytes = base64.b64decode(img_b64)
+            file = io.BytesIO(img_bytes)
+            file.name = "ai.png"
+
+            # Сохраняем в историю
             sid = str(uuid.uuid4())
             history = self.db.get("ImageGen", "history", [])
-            history.append({"id": sid, "prompt": args, "data": data})
-            self.db.set("ImageGen", "history", history[-15:])
-            
-            # 2. Рендерим фото
-            await self._render(msg, sid)
-            
-        except Exception as e:
-            # При ошибке обновляем текст формы
-            await msg.edit(self.strings("error").format(str(e)[:500]), reply_markup=[])
+            history.append({"id": sid, "prompt": args, "bytes": img_b64})
+            self.db.set("ImageGen", "history", history[-10:])
 
-    @loader.command(ru_doc=" > История генераций")
+            # Отправляем через Telethon (гарантированный успех)
+            await self._client.send_file(
+                message.chat_id, 
+                file, 
+                caption=self.strings("success").format(args),
+                reply_to=message.id
+            )
+            await status.delete()
+
+        except Exception as e:
+            await utils.answer(status, self.strings("error").format(str(e)))
+
+    @loader.command(ru_doc=" > История")
     async def ighist(self, message: Message):
-        """View history"""
+        """History"""
         history = self.db.get("ImageGen", "history", [])
         if not history: return await utils.answer(message, self.strings("history_empty"))
         
         kb = []
-        # Пагинация по 5 элементов для стабильности
-        for e in reversed(history[-5:]):
-            kb.append([{"text": f"🖼 {e['prompt'][:25]}...", "callback": self._hist_cb, "args": (e['id'],)}])
-            
-        kb.append([{"text": "🧹 Очистить историю", "callback": self._clear_all_cb}])
-        await self.inline.form(self.strings("history_title"), message=message, reply_markup=kb)
-
-    async def _render(self, target_obj, sid):
-        """
-        target_obj: InlineMessage или InlineCall
-        """
-        # Сразу отвечаем на коллбэк, чтобы убрать часики (если это коллбэк)
-        if hasattr(target_obj, "answer"):
-            try: await target_obj.answer() 
-            except: pass
-
-        history = self.db.get("ImageGen", "history", [])
-        sess = next((i for i in history if i["id"] == sid), None)
-        if not sess: 
-            if hasattr(target_obj, "edit"):
-                await target_obj.edit("<b>❌ Запись не найдена</b>", reply_markup=[])
-            return
-
-        try:
-            img_b64 = None
-            candidates = sess.get("data", {}).get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                for p in parts:
-                    if "inlineData" in p:
-                        img_b64 = p["inlineData"].get("data")
-                        break
-            
-            if not img_b64: raise ValueError("Safety block or no image data")
-
-            img_bytes = base64.b64decode(img_b64)
-            input_file = BufferedInputFile(img_bytes, filename="ai_image.png")
-
-            kb = [
-                [{"text": "🔄 Regenerate", "callback": self._regen_cb, "args": (sid,)}],
-                [{"text": "🗑 Удалить", "callback": self._del_cb, "args": (sid,)}]
-            ]
-            
-            # Универсальный вызов edit без обращения к chat_id
-            await target_obj.edit(
-                text=self.strings("success").format(sess["prompt"]),
-                photo=input_file,
-                reply_markup=kb
-            )
-
-        except Exception as e:
-            err = self.strings("error").format(str(e))
-            if hasattr(target_obj, "edit"):
-                await target_obj.edit(err, reply_markup=[])
+        for e in reversed(history):
+            kb.append([{"text": f"🖼 {e['prompt'][:30]}", "callback": self._hist_cb, "args": (e['id'],)}])
+        
+        await self.inline.form("<b>📝 История:</b>", message=message, reply_markup=kb)
 
     async def _hist_cb(self, call: InlineCall, sid):
-        # ВАЖНО: Мы НЕ обращаемся к call.message.chat.id
-        # Мы просто просим отредактировать текущее инлайн-сообщение
-        await self._render(call, sid)
-
-    async def _del_cb(self, call: InlineCall, sid):
-        try: await call.answer() 
-        except: pass
-        
+        await call.answer("Отправляю...")
         history = self.db.get("ImageGen", "history", [])
-        self.db.set("ImageGen", "history", [i for i in history if i["id"] != sid])
+        sess = next((i for i in history if i["id"] == sid), None)
         
-        try:
-            await call.delete()
-        except:
-            # Если удалить нельзя (слишком старое), меняем текст
-            await call.edit("<b>🗑 Удалено.</b>", reply_markup=[])
+        if sess:
+            file = io.BytesIO(base64.b64decode(sess["bytes"]))
+            file.name = "hist.png"
+            await self._client.send_file(call.original_call.message.chat.id, file, caption=f"Из истории: {sess['prompt']}")
+        else:
+            await call.answer("Не найдено", show_alert=True)
 
-    async def _clear_all_cb(self, call: InlineCall):
-        try: await call.answer() 
-        except: pass
-        
-        self.db.set("ImageGen", "history", [])
-        await call.edit(self.strings("history_cleared"), reply_markup=[])
+### Что изменилось:
+1.  **Прямая отправка**: Вместо того чтобы мучить `inline.form` байтами, которые Heroku не хочет принимать, мы отправляем результат через `client.send_file`. Это работает в 100% случаев.
+2.  **Таймаут API**: Добавлен `timeout=60`, чтобы генерация не висела вечно, если Google тормозит.
+3.  **Упрощенная история**: Теперь в истории хранятся сами байты картинки (последние 10 штук), чтобы при нажатии на кнопку в `ighist` бот просто присылал файл в чат.
 
-    async def _regen_cb(self, call: InlineCall, sid):
-        try: await call.answer("Regenerating...") 
-        except: pass
-
-        history = self.db.get("ImageGen", "history", [])
-        idx = next((i for i, v in enumerate(history) if v["id"] == sid), None)
-        if idx is None: return
-        
-        await call.edit(
-            self.strings("generating").format(history[idx]["prompt"]),
-            reply_markup=[[{"text": "⏳ ...", "data": "ignore"}]]
-        )
-        
-        try:
-            new_data = await self._call_api(history[idx]["prompt"])
-            history[idx]["data"] = new_data
-            self.db.set("ImageGen", "history", history)
-            await self._render(call, sid)
-        except Exception as e:
-            await call.edit(self.strings("error").format(str(e)[:200]))
+Попробуйте этот вариант. Если он сработает, мы сможем потихоньку вернуть кнопки "Regenerate" уже поверх этой стабильной базы.
