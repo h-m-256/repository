@@ -10,10 +10,12 @@ import uuid
 from .. import loader, utils
 from telethon.tl.types import Message
 from ..inline.types import InlineCall
+# Импортируем правильный тип файла для aiogram 3.x
+from aiogram.types import BufferedInputFile
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """AI Image Generation with History (Fixed for Heroku Core)"""
+    """AI Image Generation with History (Fixed for Aiogram 3.x)"""
 
     strings = {
         "name": "ImageGen",
@@ -64,14 +66,14 @@ class ImageGenMod(loader.Module):
         if not args: return await utils.answer(message, "Введите промпт")
         if not self.config["api_key"]: return await utils.answer(message, self.strings("no_api"))
 
-        # 1. Отправляем текстовую форму (placeholder)
+        # 1. Отправляем плейсхолдер (только текст)
         msg = await self.inline.form(
             text=self.strings("generating").format(args),
             message=message,
             reply_markup=[[{"text": "⏳ Загрузка...", "data": "ignore"}]]
         )
         
-        if not msg: return # Если форма не отправилась
+        if not msg: return
 
         try:
             data = await self._call_api(args)
@@ -80,11 +82,10 @@ class ImageGenMod(loader.Module):
             history.append({"id": sid, "prompt": args, "data": data})
             self.db.set("ImageGen", "history", history[-15:])
             
-            # 2. Теперь редактируем сообщение, добавляя фото (это разрешено в utils.py)
+            # 2. Редактируем с добавлением фото
             await self._render(msg, sid)
             
         except Exception as e:
-            # Если ошибка, редактируем текст формы
             await msg.edit(self.strings("error").format(str(e)[:500]), reply_markup=[])
 
     @loader.command(ru_doc=" > История генераций")
@@ -97,9 +98,6 @@ class ImageGenMod(loader.Module):
         await self.inline.form(self.strings("history_title"), message=message, reply_markup=kb)
 
     async def _render(self, target_obj, sid):
-        """
-        target_obj: может быть InlineMessage (результат .form) или InlineCall
-        """
         history = self.db.get("ImageGen", "history", [])
         sess = next((i for i in history if i["id"] == sid), None)
         if not sess: return
@@ -116,46 +114,52 @@ class ImageGenMod(loader.Module):
             
             if not img_b64: raise ValueError("Safety block or no image data")
 
-            # Конвертируем в BytesIO
             img_bytes = base64.b64decode(img_b64)
-            file = io.BytesIO(img_bytes)
-            file.name = "image.png" # Важно для aiogram
+            
+            # ФИКС ДЛЯ Aiogram 3.x + Heroku Core
+            # Используем BufferedInputFile, чтобы избежать AbstractMethodError в ядре
+            # filename обязателен для BufferedInputFile
+            input_file = BufferedInputFile(img_bytes, filename="ai_image.png")
 
             kb = [
                 [{"text": "🔄 Regenerate", "callback": self._regen_cb, "args": (sid,)}],
                 [{"text": "🗑 Удалить", "callback": self._del_cb, "args": (sid,)}]
             ]
             
-            # Используем .edit(), который поддерживает bytes/BytesIO (см. utils.py line 375+)
-            # Мы передаем photo=file, так как utils.py обрабатывает photo как медиа
+            # Передаем photo=input_file. Ядро должно корректно передать это в aiogram.
             await target_obj.edit(
                 text=self.strings("success").format(sess["prompt"]),
-                photo=file,
+                photo=input_file,
                 reply_markup=kb
             )
 
         except Exception as e:
-            await target_obj.edit(self.strings("error").format(str(e)))
+            # Если возникла ошибка, пробуем показать её текстом
+            err_msg = self.strings("error").format(str(e))
+            if hasattr(target_obj, "edit"):
+                await target_obj.edit(err_msg, reply_markup=[])
+            elif hasattr(target_obj, "answer"):
+                await target_obj.answer(err_msg, show_alert=True)
 
     async def _hist_cb(self, call: InlineCall, sid):
-        # Если сообщение устарело и call.message == None, мы не можем его редактировать.
-        # Поэтому мы отправляем новую форму.
-        if not getattr(call, "message", None):
-            await call.answer("Сообщение устарело, отправляю новое...")
-            # Получаем ID чата из объекта вызова
-            chat_id = call.original_call.message.chat.id
-            msg = await self.inline.form("⏳ Загрузка...", message=chat_id)
-            if msg: await self._render(msg, sid)
-        else:
-            await self._render(call, sid)
+        # ФИКС AttributeError: убрана проверка message/chat
+        # Просто рендерим через edit (он работает по inline_message_id)
+        await self._render(call, sid)
+        # Отвечаем на call, чтобы убрать часики, если _render не сработал мгновенно
+        try:
+            await call.answer() 
+        except: 
+            pass
 
     async def _del_cb(self, call: InlineCall, sid):
         history = self.db.get("ImageGen", "history", [])
         self.db.set("ImageGen", "history", [i for i in history if i["id"] != sid])
-        if getattr(call, "message", None):
+        # Если это InlineMessage (через ighist), удаление может не сработать, если сообщение старое,
+        # но мы попробуем. Если нет - просто уведомление.
+        try:
             await call.delete()
-        else:
-            await call.answer("Удалено из базы", show_alert=True)
+        except:
+            await call.edit("<b>🗑 Удалено из базы данных.</b>", reply_markup=[])
 
     async def _clear_all_cb(self, call: InlineCall):
         self.db.set("ImageGen", "history", [])
