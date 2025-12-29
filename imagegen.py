@@ -10,12 +10,11 @@ import uuid
 from .. import loader, utils
 from telethon.tl.types import Message
 from ..inline.types import InlineCall
-# Импортируем правильный тип файла для aiogram 3.x
 from aiogram.types import BufferedInputFile
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """AI Image Generation with History (Fixed for Aiogram 3.x)"""
+    """AI Image Generation with History (Max Compatibility)"""
 
     strings = {
         "name": "ImageGen",
@@ -66,7 +65,7 @@ class ImageGenMod(loader.Module):
         if not args: return await utils.answer(message, "Введите промпт")
         if not self.config["api_key"]: return await utils.answer(message, self.strings("no_api"))
 
-        # 1. Отправляем плейсхолдер (только текст)
+        # 1. Отправляем текстовую форму (placeholder)
         msg = await self.inline.form(
             text=self.strings("generating").format(args),
             message=message,
@@ -82,10 +81,11 @@ class ImageGenMod(loader.Module):
             history.append({"id": sid, "prompt": args, "data": data})
             self.db.set("ImageGen", "history", history[-15:])
             
-            # 2. Редактируем с добавлением фото
+            # 2. Рендерим фото
             await self._render(msg, sid)
             
         except Exception as e:
+            # При ошибке обновляем текст формы
             await msg.edit(self.strings("error").format(str(e)[:500]), reply_markup=[])
 
     @loader.command(ru_doc=" > История генераций")
@@ -93,14 +93,30 @@ class ImageGenMod(loader.Module):
         """View history"""
         history = self.db.get("ImageGen", "history", [])
         if not history: return await utils.answer(message, self.strings("history_empty"))
-        kb = [[{"text": f"🖼 {e['prompt'][:25]}...", "callback": self._hist_cb, "args": (e['id'],)}] for e in reversed(history)]
+        
+        kb = []
+        # Пагинация по 5 элементов для стабильности
+        for e in reversed(history[-5:]):
+            kb.append([{"text": f"🖼 {e['prompt'][:25]}...", "callback": self._hist_cb, "args": (e['id'],)}])
+            
         kb.append([{"text": "🧹 Очистить историю", "callback": self._clear_all_cb}])
         await self.inline.form(self.strings("history_title"), message=message, reply_markup=kb)
 
     async def _render(self, target_obj, sid):
+        """
+        target_obj: InlineMessage или InlineCall
+        """
+        # Сразу отвечаем на коллбэк, чтобы убрать часики (если это коллбэк)
+        if hasattr(target_obj, "answer"):
+            try: await target_obj.answer() 
+            except: pass
+
         history = self.db.get("ImageGen", "history", [])
         sess = next((i for i in history if i["id"] == sid), None)
-        if not sess: return
+        if not sess: 
+            if hasattr(target_obj, "edit"):
+                await target_obj.edit("<b>❌ Запись не найдена</b>", reply_markup=[])
+            return
 
         try:
             img_b64 = None
@@ -115,10 +131,6 @@ class ImageGenMod(loader.Module):
             if not img_b64: raise ValueError("Safety block or no image data")
 
             img_bytes = base64.b64decode(img_b64)
-            
-            # ФИКС ДЛЯ Aiogram 3.x + Heroku Core
-            # Используем BufferedInputFile, чтобы избежать AbstractMethodError в ядре
-            # filename обязателен для BufferedInputFile
             input_file = BufferedInputFile(img_bytes, filename="ai_image.png")
 
             kb = [
@@ -126,7 +138,7 @@ class ImageGenMod(loader.Module):
                 [{"text": "🗑 Удалить", "callback": self._del_cb, "args": (sid,)}]
             ]
             
-            # Передаем photo=input_file. Ядро должно корректно передать это в aiogram.
+            # Универсальный вызов edit без обращения к chat_id
             await target_obj.edit(
                 text=self.strings("success").format(sess["prompt"]),
                 photo=input_file,
@@ -134,38 +146,39 @@ class ImageGenMod(loader.Module):
             )
 
         except Exception as e:
-            # Если возникла ошибка, пробуем показать её текстом
-            err_msg = self.strings("error").format(str(e))
+            err = self.strings("error").format(str(e))
             if hasattr(target_obj, "edit"):
-                await target_obj.edit(err_msg, reply_markup=[])
-            elif hasattr(target_obj, "answer"):
-                await target_obj.answer(err_msg, show_alert=True)
+                await target_obj.edit(err, reply_markup=[])
 
     async def _hist_cb(self, call: InlineCall, sid):
-        # ФИКС AttributeError: убрана проверка message/chat
-        # Просто рендерим через edit (он работает по inline_message_id)
+        # ВАЖНО: Мы НЕ обращаемся к call.message.chat.id
+        # Мы просто просим отредактировать текущее инлайн-сообщение
         await self._render(call, sid)
-        # Отвечаем на call, чтобы убрать часики, если _render не сработал мгновенно
-        try:
-            await call.answer() 
-        except: 
-            pass
 
     async def _del_cb(self, call: InlineCall, sid):
+        try: await call.answer() 
+        except: pass
+        
         history = self.db.get("ImageGen", "history", [])
         self.db.set("ImageGen", "history", [i for i in history if i["id"] != sid])
-        # Если это InlineMessage (через ighist), удаление может не сработать, если сообщение старое,
-        # но мы попробуем. Если нет - просто уведомление.
+        
         try:
             await call.delete()
         except:
-            await call.edit("<b>🗑 Удалено из базы данных.</b>", reply_markup=[])
+            # Если удалить нельзя (слишком старое), меняем текст
+            await call.edit("<b>🗑 Удалено.</b>", reply_markup=[])
 
     async def _clear_all_cb(self, call: InlineCall):
+        try: await call.answer() 
+        except: pass
+        
         self.db.set("ImageGen", "history", [])
         await call.edit(self.strings("history_cleared"), reply_markup=[])
 
     async def _regen_cb(self, call: InlineCall, sid):
+        try: await call.answer("Regenerating...") 
+        except: pass
+
         history = self.db.get("ImageGen", "history", [])
         idx = next((i for i, v in enumerate(history) if v["id"] == sid), None)
         if idx is None: return
