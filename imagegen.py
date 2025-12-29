@@ -12,13 +12,13 @@ from ..inline.types import InlineCall
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """AI Image Generation with History & Regenerate"""
+    """AI Image Generation with Stable History"""
 
     strings = {
         "name": "ImageGen",
         "api_key": "Google AI Studio API key",
         "model": "Model to use for generation",
-        "generating": "⌛ <b>Генерирую...</b>\n<i>{}</i>",
+        "generating": "⌛ <b>Генерирую новый вариант...</b>\n<i>{}</i>",
         "error": "❌ <b>Ошибка:</b> <code>{}</code>",
         "success": "✅ <b>Готово!</b>\n<i>{}</i>",
         "history_empty": "❌ История пуста!",
@@ -50,7 +50,7 @@ class ImageGenMod(loader.Module):
 
     @loader.command(ru_doc=" > Сгенерировать изображение")
     async def ig(self, message: Message):
-        """Generate image with regenerate button"""
+        """Generate image with stable regenerate button"""
         args = utils.get_args_raw(message)
         if not args: return await utils.answer(message, "Введите промпт")
         if not self.config["api_key"]: return await utils.answer(message, "Настрой API ключ!")
@@ -58,47 +58,62 @@ class ImageGenMod(loader.Module):
         await self._process_gen(message, args)
 
     async def _process_gen(self, message, prompt, call=None):
+        # 1. Информируем пользователя
         if call:
-            await call.answer("Генерирую новый вариант...")
-            # Чтобы не было бесконечных часиков, редактируем сообщение
+            await call.answer("Генерирую...")
+            # В инлайне редактируем текст на статус загрузки
             await call.edit(self.strings("generating").format(prompt))
         else:
             status = await utils.answer(message, self.strings("generating").format(prompt))
 
         try:
+            # 2. Получаем данные от API
             data = await self._call_api(prompt)
             img_b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
             img_bytes = base64.b64decode(img_b64)
             
+            # 3. Сохраняем в историю
             sid = str(uuid.uuid4())
             history = self.db.get("ImageGen", "history", [])
             history.append({"id": sid, "prompt": prompt, "bytes": img_b64})
             self.db.set("ImageGen", "history", history[-10:])
 
+            # 4. Формируем файл
             file = io.BytesIO(img_bytes)
             file.name = "ai.png"
 
-            # Кнопка для перегенерации
-            kb = [[{"text": "🔄 Перегенерировать", "callback": self._regen_cb, "args": (prompt,)}]]
+            # 5. Кнопки (Формат Telethon для send_file)
+            # В Heroku/Hikka мы используем build_reply_markup из клиента
+            buttons = self._client.build_reply_markup([
+                [{"text": "🔄 Перегенерировать", "callback": self._regen_cb, "args": (prompt,)}]
+            ])
 
-            # Отправляем через встроенный метод Hikka, который умеет и в фото, и в кнопки
-            chat_id = message.chat_id if not call else call.message.chat.id
-            
+            # Определение ID чата (самый стабильный метод)
+            chat_id = utils.get_chat_id(message)
+
+            # 6. Отправка результата
             await self._client.send_file(
                 chat_id,
                 file,
                 caption=self.strings("success").format(prompt),
-                buttons=self.inline.generate_markup(kb) if hasattr(self.inline, "generate_markup") else kb
+                buttons=buttons
             )
             
-            # Удаляем старое текстовое сообщение "Генерирую..."
-            if not call: await status.delete()
-            else: await call.delete()
+            # Удаляем статусное сообщение
+            if not call:
+                await status.delete()
+            else:
+                try:
+                    await call.delete()
+                except:
+                    pass
 
         except Exception as e:
             err_msg = self.strings("error").format(str(e))
-            if not call: await utils.answer(status, err_msg)
-            else: await call.edit(err_msg)
+            if not call:
+                await utils.answer(status, err_msg)
+            else:
+                await call.edit(err_msg)
 
     @loader.command(ru_doc=" > История")
     async def ighist(self, message: Message):
@@ -111,10 +126,10 @@ class ImageGenMod(loader.Module):
             kb.append([{"text": f"🖼 {e['prompt'][:30]}", "callback": self._hist_cb, "args": (e['id'],)}])
         
         kb.append([{"text": "🧹 Очистить историю", "callback": self._clear_all_cb}])
-        await self.inline.form("<b>📝 История:</b>", message=message, reply_markup=kb)
+        await self.inline.form("<b>📝 История генераций:</b>", message=message, reply_markup=kb)
 
     async def _regen_cb(self, call: InlineCall, prompt):
-        # Важно передать call.message, чтобы подхватить правильный чат
+        # Передаем оригинальное сообщение для контекста чата
         await self._process_gen(call.message, prompt, call=call)
 
     async def _hist_cb(self, call: InlineCall, sid):
@@ -128,12 +143,18 @@ class ImageGenMod(loader.Module):
         file = io.BytesIO(base64.b64decode(sess["bytes"]))
         file.name = "hist.png"
         
-        # Самый безопасный способ отправки в тот же чат
+        # Безопасное получение chat_id для инлайна
+        chat_id = utils.get_chat_id(call.message)
+        
+        buttons = self._client.build_reply_markup([
+            [{"text": "🔄 Перегенерировать", "callback": self._regen_cb, "args": (sess['prompt'],)}]
+        ])
+
         await self._client.send_file(
-            call.message.chat.id, 
+            chat_id, 
             file, 
             caption=f"📜 <b>Из истории</b>\n<i>{sess['prompt']}</i>",
-            buttons=[[{"text": "🔄 Перегенерировать", "callback": self._regen_cb, "args": (sess['prompt'],)}]]
+            buttons=buttons
         )
 
     async def _clear_all_cb(self, call: InlineCall):
