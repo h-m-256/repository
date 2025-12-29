@@ -1,6 +1,5 @@
 #meta developer: @h_m_256
-#блять код такой кривой, лан похуй
-#вайбкодинг edition
+#еще один вайбкод
 
 import asyncio
 import aiohttp
@@ -19,23 +18,28 @@ class ImageGenMod(loader.Module):
 
     strings = {
         "name": "ImageGen",
-        "_api_key": "Google AI Studio API key",
+        "api_key": "Google AI Studio API key",
+        "model": "Model to use for generation",
+        "default_prompt_prefix": "Default prompt prefix",
         "no_api": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>API key not configured!</b>',
         "generating": '<a href="tg://emoji?id=5386367538735104399">⌛</a> <b>Generating image...</b>\n\n<i>Prompt: {}</i>',
         "editing": '<a href="tg://emoji?id=5386367538735104399">⌛</a> <b>Editing image...</b>\n\n<i>Prompt: {}</i>',
         "error": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>Error:</b>\n<code>{}</code>',
-        "success": '<a href="tg://emoji?id=5427009714745517609">✅</a> <b>Success!</b> (Variant {}/{})\n\n<i>Prompt: {}</i>',
+        "success": '<a href="tg://emoji?id=5427009714745517609">✅</a> <b>Success!</b>\n\n<i>Prompt: {}</i>',
         "usage": '<a href="tg://emoji?id=5334882760735598374">📝</a> <b>Usage:</b> <code>.ig [prompt]</code>',
         "history_empty": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>History is empty!</b>',
         "history_title": '<a href="tg://emoji?id=5334882760735598374">📝</a> <b>Generation History:</b>',
     }
     
     strings_ru = {
+        "api_key": "API ключ Google AI Studio",
+        "model": "Модель для генерации",
+        "default_prompt_prefix": "Префикс промпта по умолчанию",
         "no_api": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>API ключ не настроен!</b>',
         "generating": '<a href="tg://emoji?id=5386367538735104399">⌛</a> <b>Генерация изображения...</b>\n\n<i>Промпт: {}</i>',
         "editing": '<a href="tg://emoji?id=5386367538735104399">⌛</a> <b>Редактирование изображения...</b>\n\n<i>Промпт: {}</i>',
         "error": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>Ошибка:</b>\n<code>{}</code>',
-        "success": '<a href="tg://emoji?id=5427009714745517609">✅</a> <b>Готово!</b> (Вариант {}/{})\n\n<i>Промпт: {}</i>',
+        "success": '<a href="tg://emoji?id=5427009714745517609">✅</a> <b>Готово!</b>\n\n<i>Промпт: {}</i>',
         "usage": '<a href="tg://emoji?id=5334882760735598374">📝</a> <b>Использование:</b> <code>.ig [промпт]</code>',
         "history_empty": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>История пуста!</b>',
         "history_title": '<a href="tg://emoji?id=5334882760735598374">📝</a> <b>История генераций:</b>',
@@ -44,11 +48,11 @@ class ImageGenMod(loader.Module):
     def __init__(self):
         self.config = loader.ModuleConfig(
             loader.ConfigValue(
-                "API_KEY", "", lambda: "Google AI Studio API key",
+                "api_key", "", lambda: self.strings("api_key"),
                 validator=loader.validators.Hidden(),
             ),
             loader.ConfigValue(
-                "MODEL", "gemini-2.5-flash-image", lambda: "Model to use",
+                "model", "gemini-2.5-flash-image", lambda: self.strings("model"),
                 validator=loader.validators.Choice([
                     "gemini-2.5-flash-image", 
                     "gemini-2.5-flash-image-preview",
@@ -59,6 +63,9 @@ class ImageGenMod(loader.Module):
                     "imagen-4.0-fast-generate-001"
                 ]),
             ),
+            loader.ConfigValue(
+                "default_prompt_prefix", "", lambda: self.strings("default_prompt_prefix"),
+            ),
         )
 
     async def client_ready(self, client, db):
@@ -66,8 +73,11 @@ class ImageGenMod(loader.Module):
         self.db = db
 
     async def _call_api(self, prompt: str, image_bytes: bytes = None):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config['MODEL']}:generateContent?key={self.config['API_KEY']}"
-        parts = [{"text": prompt}]
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config['model']}:generateContent?key={self.config['api_key']}"
+        
+        full_prompt = f"{self.config['default_prompt_prefix']} {prompt}".strip()
+        parts = [{"text": full_prompt}]
+        
         if image_bytes:
             parts.append({"inlineData": {"mimeType": "image/png", "data": base64.b64encode(image_bytes).decode()}})
         
@@ -77,14 +87,17 @@ class ImageGenMod(loader.Module):
                 "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", 
                 "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"
             ]],
-            "generationConfig": {"candidateCount": 4, "temperature": 1.0}
+            "generationConfig": {
+                "candidateCount": 1, # Исправлено: теперь всегда 1 для совместимости
+                "temperature": 1.0
+            }
         }
 
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload) as resp:
                 data = await resp.json()
                 if resp.status != 200:
-                    raise ValueError(json.dumps(data, indent=2))
+                    raise ValueError(json.dumps(data, indent=2, ensure_ascii=False))
                 return data
 
     def _save_to_history(self, prompt, data, photo_bytes=None):
@@ -110,7 +123,7 @@ class ImageGenMod(loader.Module):
 
         if not args and not photo:
             return await utils.answer(message, self.strings("usage"))
-        if not self.config["API_KEY"]:
+        if not self.config["api_key"]:
             return await utils.answer(message, self.strings("no_api"))
 
         status_text = self.strings("editing" if photo else "generating").format(args or "Enhance")
@@ -148,7 +161,8 @@ class ImageGenMod(loader.Module):
 
         candidates = sess["data"].get("candidates", [])
         if not candidates:
-            err = self.strings("error").format("No candidates")
+            feedback = sess["data"].get("promptFeedback", "Blocked by Safety Filter")
+            err = self.strings("error").format(f"No candidates. Feedback: {json.dumps(feedback)}")
             return await (status_msg.edit(err) if status_msg else message.edit(err))
 
         img_b64 = None
@@ -164,14 +178,9 @@ class ImageGenMod(loader.Module):
         file = io.BytesIO(base64.b64decode(img_b64))
         file.name = "ai.png"
         
-        count = len(candidates)
-        kb = [[
-            {"text": "⬅️", "callback": self._switch, "args": (sid, (index - 1) % count)},
-            {"text": f"{index + 1}/{count}", "callback": self._switch, "args": (sid, index)},
-            {"text": "➡️", "callback": self._switch, "args": (sid, (index + 1) % count)},
-        ], [{"text": "🔄 Regenerate", "callback": self._regen, "args": (sid,)}]]
+        kb = [[{"text": "🔄 Regenerate", "callback": self._regen, "args": (sid,)}]]
 
-        caption = self.strings("success").format(index + 1, count, sess["prompt"])
+        caption = self.strings("success").format(sess["prompt"])
         
         if status_msg:
             await status_msg.delete()
