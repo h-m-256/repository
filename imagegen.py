@@ -1,5 +1,5 @@
 #meta developer: @h_m_256
-#все сгенерировано ии, не обращайте внимания
+#все снизу сгенерировано ии ☃️
 
 import asyncio
 import aiohttp
@@ -13,7 +13,7 @@ from ..inline.types import InlineCall
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """AI Image Generation with History"""
+    """AI Image Generation with History (Fixed for Heroku Core)"""
 
     strings = {
         "name": "ImageGen",
@@ -64,16 +64,28 @@ class ImageGenMod(loader.Module):
         if not args: return await utils.answer(message, "Введите промпт")
         if not self.config["api_key"]: return await utils.answer(message, self.strings("no_api"))
 
-        status_msg = await utils.answer(message, self.strings("generating").format(args))
+        # 1. Отправляем текстовую форму (placeholder)
+        msg = await self.inline.form(
+            text=self.strings("generating").format(args),
+            message=message,
+            reply_markup=[[{"text": "⏳ Загрузка...", "data": "ignore"}]]
+        )
+        
+        if not msg: return # Если форма не отправилась
+
         try:
             data = await self._call_api(args)
             sid = str(uuid.uuid4())
             history = self.db.get("ImageGen", "history", [])
             history.append({"id": sid, "prompt": args, "data": data})
             self.db.set("ImageGen", "history", history[-15:])
-            await self._render(message, sid, status_msg)
+            
+            # 2. Теперь редактируем сообщение, добавляя фото (это разрешено в utils.py)
+            await self._render(msg, sid)
+            
         except Exception as e:
-            await utils.answer(status_msg, self.strings("error").format(str(e)[:500]))
+            # Если ошибка, редактируем текст формы
+            await msg.edit(self.strings("error").format(str(e)[:500]), reply_markup=[])
 
     @loader.command(ru_doc=" > История генераций")
     async def ighist(self, message: Message):
@@ -84,7 +96,10 @@ class ImageGenMod(loader.Module):
         kb.append([{"text": "🧹 Очистить историю", "callback": self._clear_all_cb}])
         await self.inline.form(self.strings("history_title"), message=message, reply_markup=kb)
 
-    async def _render(self, message, sid, status_msg=None):
+    async def _render(self, target_obj, sid):
+        """
+        target_obj: может быть InlineMessage (результат .form) или InlineCall
+        """
         history = self.db.get("ImageGen", "history", [])
         sess = next((i for i in history if i["id"] == sid), None)
         if not sess: return
@@ -101,57 +116,65 @@ class ImageGenMod(loader.Module):
             
             if not img_b64: raise ValueError("Safety block or no image data")
 
-            # РЕШЕНИЕ ДЛЯ HEROKU:
-            # Вместо передачи BytesIO в форму, мы сначала загружаем файл в Telegram 
-            # через send_file и забираем медиа-объект. Это 100% работает в heroku.inline.form
-            photo_bytes = base64.b64decode(img_b64)
-            sent = await self._client.send_file("me", photo_bytes, force_document=False)
-            media = sent.photo # Это тот самый тип, который ожидает ядро
+            # Конвертируем в BytesIO
+            img_bytes = base64.b64decode(img_b64)
+            file = io.BytesIO(img_bytes)
+            file.name = "image.png" # Важно для aiogram
 
             kb = [
                 [{"text": "🔄 Regenerate", "callback": self._regen_cb, "args": (sid,)}],
                 [{"text": "🗑 Удалить", "callback": self._del_cb, "args": (sid,)}]
             ]
             
-            if status_msg: await status_msg.delete()
-            
-            await self.inline.form(
+            # Используем .edit(), который поддерживает bytes/BytesIO (см. utils.py line 375+)
+            # Мы передаем photo=file, так как utils.py обрабатывает photo как медиа
+            await target_obj.edit(
                 text=self.strings("success").format(sess["prompt"]),
-                message=message,
-                file=media,
+                photo=file,
                 reply_markup=kb
             )
-            await sent.delete() # Удаляем мусор из Избранного
 
         except Exception as e:
-            err = self.strings("error").format(str(e))
-            if status_msg: await status_msg.edit(err)
-            else: await self._client.send_message(message.chat_id, err)
+            await target_obj.edit(self.strings("error").format(str(e)))
 
     async def _hist_cb(self, call: InlineCall, sid):
-        # Используем call.answer, чтобы убрать крутилку
-        await call.answer()
-        await self._render(call.message, sid)
+        # Если сообщение устарело и call.message == None, мы не можем его редактировать.
+        # Поэтому мы отправляем новую форму.
+        if not getattr(call, "message", None):
+            await call.answer("Сообщение устарело, отправляю новое...")
+            # Получаем ID чата из объекта вызова
+            chat_id = call.original_call.message.chat.id
+            msg = await self.inline.form("⏳ Загрузка...", message=chat_id)
+            if msg: await self._render(msg, sid)
+        else:
+            await self._render(call, sid)
 
     async def _del_cb(self, call: InlineCall, sid):
         history = self.db.get("ImageGen", "history", [])
         self.db.set("ImageGen", "history", [i for i in history if i["id"] != sid])
-        await call.delete()
+        if getattr(call, "message", None):
+            await call.delete()
+        else:
+            await call.answer("Удалено из базы", show_alert=True)
 
     async def _clear_all_cb(self, call: InlineCall):
         self.db.set("ImageGen", "history", [])
-        # Теперь пишет "История очищена"
-        await call.edit(self.strings("history_cleared"))
+        await call.edit(self.strings("history_cleared"), reply_markup=[])
 
     async def _regen_cb(self, call: InlineCall, sid):
         history = self.db.get("ImageGen", "history", [])
         idx = next((i for i, v in enumerate(history) if v["id"] == sid), None)
         if idx is None: return
-        await call.answer("Regenerating...")
+        
+        await call.edit(
+            self.strings("generating").format(history[idx]["prompt"]),
+            reply_markup=[[{"text": "⏳ ...", "data": "ignore"}]]
+        )
+        
         try:
             new_data = await self._call_api(history[idx]["prompt"])
             history[idx]["data"] = new_data
             self.db.set("ImageGen", "history", history)
-            await self._render(call.message, sid)
+            await self._render(call, sid)
         except Exception as e:
-            await call.answer(f"Error: {str(e)[:100]}", show_alert=True)
+            await call.edit(self.strings("error").format(str(e)[:200]))
