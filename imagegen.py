@@ -1,5 +1,5 @@
 #meta developer: @h_m_256
-#вайбкод лень edition
+#все сгенерировано ии, не обращайте внимания
 
 import asyncio
 import aiohttp
@@ -13,26 +13,13 @@ from ..inline.types import InlineCall
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """AI Image Generation with History (Fixed for Heroku & Emoji)"""
+    """AI Image Generation with History"""
 
     strings = {
         "name": "ImageGen",
         "api_key": "Google AI Studio API key",
         "model": "Model to use for generation",
         "default_prompt_prefix": "Default prompt prefix",
-        "no_api": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>API key not configured!</b>',
-        "generating": '<a href="tg://emoji?id=5386367538735104399">⌛</a> <b>Generating image...</b>\n\n<i>Prompt: {}</i>',
-        "error": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>Error:</b>\n<code>{}</code>',
-        "success": '<a href="tg://emoji?id=5427009714745517609">✅</a> <b>Success!</b>\n\n<i>Prompt: {}</i>',
-        "history_empty": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>History is empty!</b>',
-        "history_cleared": '<a href="tg://emoji?id=5427009714745517609">✅</a> <b>History cleared!</b>',
-        "history_title": '<a href="tg://emoji?id=5334882760735598374">📝</a> <b>Generation History:</b>',
-    }
-    
-    strings_ru = {
-        "api_key": "API ключ Google AI Studio",
-        "model": "Модель для генерации",
-        "default_prompt_prefix": "Префикс промпта по умолчанию",
         "no_api": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>API ключ не настроен!</b>',
         "generating": '<a href="tg://emoji?id=5386367538735104399">⌛</a> <b>Генерирую изображение...</b>\n\n<i>Промпт: {}</i>',
         "error": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>Ошибка:</b>\n<code>{}</code>',
@@ -74,7 +61,7 @@ class ImageGenMod(loader.Module):
     async def ig(self, message: Message):
         """Generate image"""
         args = utils.get_args_raw(message)
-        if not args: return await utils.answer(message, "Provide prompt")
+        if not args: return await utils.answer(message, "Введите промпт")
         if not self.config["api_key"]: return await utils.answer(message, self.strings("no_api"))
 
         status_msg = await utils.answer(message, self.strings("generating").format(args))
@@ -114,10 +101,13 @@ class ImageGenMod(loader.Module):
             
             if not img_b64: raise ValueError("Safety block or no image data")
 
-            # Отправляем файл через send_file (самый стабильный метод для Heroku)
-            file = io.BytesIO(base64.b64decode(img_b64))
-            file.name = "ai.png"
-            
+            # РЕШЕНИЕ ДЛЯ HEROKU:
+            # Вместо передачи BytesIO в форму, мы сначала загружаем файл в Telegram 
+            # через send_file и забираем медиа-объект. Это 100% работает в heroku.inline.form
+            photo_bytes = base64.b64decode(img_b64)
+            sent = await self._client.send_file("me", photo_bytes, force_document=False)
+            media = sent.photo # Это тот самый тип, который ожидает ядро
+
             kb = [
                 [{"text": "🔄 Regenerate", "callback": self._regen_cb, "args": (sid,)}],
                 [{"text": "🗑 Удалить", "callback": self._del_cb, "args": (sid,)}]
@@ -125,20 +115,22 @@ class ImageGenMod(loader.Module):
             
             if status_msg: await status_msg.delete()
             
-            # Используем inline.form на базе уже отправленного файла или напрямую
-            # Для Heroku: байты в file работают лучше, если есть .name
             await self.inline.form(
                 text=self.strings("success").format(sess["prompt"]),
                 message=message,
-                file=file,
+                file=media,
                 reply_markup=kb
             )
+            await sent.delete() # Удаляем мусор из Избранного
+
         except Exception as e:
             err = self.strings("error").format(str(e))
             if status_msg: await status_msg.edit(err)
             else: await self._client.send_message(message.chat_id, err)
 
     async def _hist_cb(self, call: InlineCall, sid):
+        # Используем call.answer, чтобы убрать крутилку
+        await call.answer()
         await self._render(call.message, sid)
 
     async def _del_cb(self, call: InlineCall, sid):
@@ -148,6 +140,7 @@ class ImageGenMod(loader.Module):
 
     async def _clear_all_cb(self, call: InlineCall):
         self.db.set("ImageGen", "history", [])
+        # Теперь пишет "История очищена"
         await call.edit(self.strings("history_cleared"))
 
     async def _regen_cb(self, call: InlineCall, sid):
