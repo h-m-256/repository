@@ -1,5 +1,5 @@
 #meta developer: @h_m_256
-#еще один вайбкод
+#есть вайбкод
 
 import asyncio
 import aiohttp
@@ -14,7 +14,7 @@ from ..inline.types import InlineCall
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """генерация/редактирование изображений через модели google"""
+    """редактирование/генерация изображений через модели google"""
 
     strings = {
         "name": "ImageGen",
@@ -30,20 +30,6 @@ class ImageGenMod(loader.Module):
         "history_empty": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>History is empty!</b>',
         "history_title": '<a href="tg://emoji?id=5334882760735598374">📝</a> <b>Generation History:</b>',
     }
-    
-    strings_ru = {
-        "api_key": "API ключ Google AI Studio",
-        "model": "Модель для генерации",
-        "default_prompt_prefix": "Префикс промпта по умолчанию",
-        "no_api": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>API ключ не настроен!</b>',
-        "generating": '<a href="tg://emoji?id=5386367538735104399">⌛</a> <b>Генерация изображения...</b>\n\n<i>Промпт: {}</i>',
-        "editing": '<a href="tg://emoji?id=5386367538735104399">⌛</a> <b>Редактирование изображения...</b>\n\n<i>Промпт: {}</i>',
-        "error": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>Ошибка:</b>\n<code>{}</code>',
-        "success": '<a href="tg://emoji?id=5427009714745517609">✅</a> <b>Готово!</b>\n\n<i>Промпт: {}</i>',
-        "usage": '<a href="tg://emoji?id=5334882760735598374">📝</a> <b>Использование:</b> <code>.ig [промпт]</code>',
-        "history_empty": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>История пуста!</b>',
-        "history_title": '<a href="tg://emoji?id=5334882760735598374">📝</a> <b>История генераций:</b>',
-    }
 
     def __init__(self):
         self.config = loader.ModuleConfig(
@@ -54,6 +40,7 @@ class ImageGenMod(loader.Module):
             loader.ConfigValue(
                 "model", "gemini-2.5-flash-image", lambda: self.strings("model"),
                 validator=loader.validators.Choice([
+                    "gemini-2.0-flash-exp",
                     "gemini-2.5-flash-image", 
                     "gemini-2.5-flash-image-preview",
                     "gemini-3-pro-image-preview",
@@ -74,7 +61,6 @@ class ImageGenMod(loader.Module):
 
     async def _call_api(self, prompt: str, image_bytes: bytes = None):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config['model']}:generateContent?key={self.config['api_key']}"
-        
         full_prompt = f"{self.config['default_prompt_prefix']} {prompt}".strip()
         parts = [{"text": full_prompt}]
         
@@ -87,10 +73,7 @@ class ImageGenMod(loader.Module):
                 "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH", 
                 "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT"
             ]],
-            "generationConfig": {
-                "candidateCount": 1, # Исправлено: теперь всегда 1 для совместимости
-                "temperature": 1.0
-            }
+            "generationConfig": {"candidateCount": 1, "temperature": 1.0}
         }
 
         async with aiohttp.ClientSession() as session:
@@ -104,9 +87,7 @@ class ImageGenMod(loader.Module):
         history = self.db.get("ImageGen", "history", [])
         sid = str(uuid.uuid4())
         entry = {
-            "id": sid,
-            "prompt": prompt,
-            "data": data,
+            "id": sid, "prompt": prompt, "data": data,
             "photo": base64.b64encode(photo_bytes).decode() if photo_bytes else None,
             "time": time.time()
         }
@@ -133,68 +114,55 @@ class ImageGenMod(loader.Module):
             prompt = args or "Enhance image"
             data = await self._call_api(prompt, photo)
             sid = self._save_to_history(prompt, data, photo)
-            await self._render_variant(message, sid, 0, status_msg)
+            await self._render_variant(message, sid, status_msg)
         except Exception as e:
             await utils.answer(status_msg, self.strings("error").format(str(e)[:1000]))
 
-    @loader.command(ru_doc=" > Посмотреть историю генераций")
+    @loader.command(ru_doc=" > История генераций")
     async def ighist(self, message: Message):
-        """View generation history"""
+        """View history"""
         history = self.db.get("ImageGen", "history", [])
-        if not history:
-            return await utils.answer(message, self.strings("history_empty"))
-        
-        kb = []
-        for entry in reversed(history):
-            text = f"🖼 {entry['prompt'][:30]}..."
-            kb.append([{"text": text, "callback": self._switch, "args": (entry['id'], 0)}])
-        
+        if not history: return await utils.answer(message, self.strings("history_empty"))
+        kb = [[{"text": f"🖼 {e['prompt'][:30]}...", "callback": self._switch, "args": (e['id'],)}] for e in reversed(history)]
         await self.inline.form(self.strings("history_title"), message=message, reply_markup=kb)
 
-    async def _render_variant(self, message, sid, index, status_msg=None):
+    async def _render_variant(self, message, sid, status_msg=None):
         history = self.db.get("ImageGen", "history", [])
         sess = next((item for item in history if item["id"] == sid), None)
-        
-        if not sess:
-            err = self.strings("error").format("Session expired")
-            return await (status_msg.edit(err) if status_msg else message.edit(err))
+        if not sess: return
 
         candidates = sess["data"].get("candidates", [])
         if not candidates:
-            feedback = sess["data"].get("promptFeedback", "Blocked by Safety Filter")
-            err = self.strings("error").format(f"No candidates. Feedback: {json.dumps(feedback)}")
+            err = self.strings("error").format("No candidates. Blocked by Safety?")
             return await (status_msg.edit(err) if status_msg else message.edit(err))
 
-        img_b64 = None
-        for part in candidates[index].get("content", {}).get("parts", []):
-            if "inlineData" in part:
-                img_b64 = part["inlineData"]["data"]
-                break
+        img_b64 = candidates[0].get("content", {}).get("parts", [{}])[0].get("inlineData", {}).get("data")
+        if not img_b64: return
+
         
-        if not img_b64:
-            err = self.strings("error").format("No image in variant")
-            return await (status_msg.edit(err) if status_msg else message.edit(err))
-
         file = io.BytesIO(base64.b64decode(img_b64))
         file.name = "ai.png"
         
-        kb = [[{"text": "🔄 Regenerate", "callback": self._regen, "args": (sid,)}]]
+        
+        uploaded = await self._client.send_file("me", file, force_document=False)
+        media = uploaded.photo
 
+        kb = [[{"text": "🔄 Regenerate", "callback": self._regen, "args": (sid,)}]]
         caption = self.strings("success").format(sess["prompt"])
         
-        if status_msg:
-            await status_msg.delete()
+        if status_msg: await status_msg.delete()
         
-        await self.inline.form(caption, message=message, file=file, reply_markup=kb)
+        
+        await self.inline.form(caption, message=message, file=media, reply_markup=kb)
+        await uploaded.delete()
 
-    async def _switch(self, call: InlineCall, sid, index):
-        await self._render_variant(call.message, sid, index)
+    async def _switch(self, call: InlineCall, sid):
+        await self._render_variant(call.message, sid)
 
     async def _regen(self, call: InlineCall, sid):
         history = self.db.get("ImageGen", "history", [])
         sess = next((item for item in history if item["id"] == sid), None)
         if not sess: return
-        
         await call.answer("Regenerating...")
         try:
             photo = base64.b64decode(sess["photo"]) if sess["photo"] else None
@@ -204,6 +172,6 @@ class ImageGenMod(loader.Module):
                     history[i]["data"] = new_data
                     break
             self.db.set("ImageGen", "history", history)
-            await self._render_variant(call.message, sid, 0)
+            await self._render_variant(call.message, sid)
         except Exception as e:
             await call.answer(f"Error: {str(e)[:100]}", show_alert=True)
