@@ -13,7 +13,7 @@ from ..inline.types import InlineCall
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """AI Image Generation with History (Fixed for Heroku)"""
+    """AI Image Generation with History (Fixed for Heroku & Models)"""
 
     strings = {
         "name": "ImageGen",
@@ -43,8 +43,14 @@ class ImageGenMod(loader.Module):
     def __init__(self):
         self.config = loader.ModuleConfig(
             loader.ConfigValue("api_key", "", lambda: self.strings("api_key"), validator=loader.validators.Hidden()),
-            loader.ConfigValue("model", "gemini-2.5-flash-image", lambda: self.strings("model"), 
-                validator=loader.validators.Choice(["gemini-2.5-flash-image", "imagen-4.0-generate-001", "imagen-4.0-ultra-generate-001"])),
+            loader.ConfigValue("model", "nano-banana-pro-preview", lambda: self.strings("model"), 
+                validator=loader.validators.Choice([
+                    "nano-banana-pro-preview",
+                    "gemini-3-pro-image-preview",
+                    "gemini-2.5-flash-image", 
+                    "imagen-4.0-generate-001", 
+                    "imagen-4.0-ultra-generate-001"
+                ])),
         )
 
     async def client_ready(self, client, db):
@@ -52,6 +58,7 @@ class ImageGenMod(loader.Module):
         self.db = db
 
     async def _call_api(self, prompt: str):
+        # Используем v1beta для поддержки новых превью-моделей
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config['model']}:generateContent?key={self.config['api_key']}"
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
@@ -60,7 +67,8 @@ class ImageGenMod(loader.Module):
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload) as resp:
                 data = await resp.json()
-                if resp.status != 200: raise ValueError(json.dumps(data, indent=2))
+                if resp.status != 200: 
+                    raise ValueError(json.dumps(data, indent=2, ensure_ascii=False))
                 return data
 
     @loader.command(ru_doc=" > Сгенерировать изображение")
@@ -75,14 +83,13 @@ class ImageGenMod(loader.Module):
             data = await self._call_api(args)
             sid = str(uuid.uuid4())
             
-            # Сохраняем в историю
             history = self.db.get("ImageGen", "history", [])
             history.append({"id": sid, "prompt": args, "data": data})
             self.db.set("ImageGen", "history", history[-15:])
             
             await self._render(message, sid, status_msg)
         except Exception as e:
-            await utils.answer(status_msg, self.strings("error").format(str(e)[:500]))
+            await utils.answer(status_msg, self.strings("error").format(str(e)[:1000]))
 
     @loader.command(ru_doc=" > История генераций")
     async def ighist(self, message: Message):
@@ -101,26 +108,40 @@ class ImageGenMod(loader.Module):
         if not sess: return
 
         try:
-            # Извлекаем данные изображения
-            img_b64 = sess["data"]["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+            # Находим данные изображения в ответе
+            img_b64 = None
+            candidates = sess.get("data", {}).get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                for p in parts:
+                    if "inlineData" in p:
+                        img_b64 = p["inlineData"].get("data")
+                        break
+            
+            if not img_b64:
+                raise ValueError("No image data. Safety filters might have blocked it.")
+
             img_bytes = base64.b64decode(img_b64)
             
-            # Чтобы избежать ошибки Heroku с BytesIO, отправляем через обычный client.send_file
-            # и прикрепляем инлайн-кнопки через form
-            kb = [[{"text": "🗑 Удалить", "callback": self._del_cb, "args": (sid,)}]]
+            kb = [
+                [{"text": "🔄 Regenerate", "callback": self._regen_cb, "args": (sid,)}],
+                [{"text": "🗑 Удалить", "callback": self._del_cb, "args": (sid,)}]
+            ]
             caption = self.strings("success").format(sess["prompt"])
 
             if status_msg: await status_msg.delete()
 
-            # Используем нативный метод отправки с поддержкой инлайна
+            # Передаем байты напрямую, Hikka сама создаст нужный объект для Telegram
             await self.inline.form(
                 text=caption,
                 message=message,
-                file=img_bytes, # Hikka сама сконвертирует это правильно
+                file=img_bytes,
                 reply_markup=kb
             )
         except Exception as e:
-            await utils.answer(message, self.strings("error").format("Safety block or API error"))
+            err_text = self.strings("error").format(str(e))
+            if status_msg: await status_msg.edit(err_text)
+            else: await utils.answer(message, err_text)
 
     async def _hist_cb(self, call: InlineCall, sid):
         await self._render(call.message, sid)
@@ -132,5 +153,18 @@ class ImageGenMod(loader.Module):
 
     async def _clear_all_cb(self, call: InlineCall):
         self.db.set("ImageGen", "history", [])
-        # Исправлено: пишем "Очищено", а не просто "История пуста"
         await call.edit(self.strings("history_cleared"))
+
+    async def _regen_cb(self, call: InlineCall, sid):
+        history = self.db.get("ImageGen", "history", [])
+        idx = next((i for i, v in enumerate(history) if v["id"] == sid), None)
+        if idx is None: return
+
+        await call.answer("Regenerating...")
+        try:
+            new_data = await self._call_api(history[idx]["prompt"])
+            history[idx]["data"] = new_data
+            self.db.set("ImageGen", "history", history)
+            await self._render(call.message, sid)
+        except Exception as e:
+            await call.answer(f"Error: {str(e)[:100]}", show_alert=True)
