@@ -13,34 +13,37 @@ from ..inline.types import InlineCall
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """AI Image Generation (Final Stability Fix)"""
+    """AI Image Generation with Aspect Ratio & History"""
 
     strings = {
         "name": "ImageGen",
         "api_key": "Google AI Studio API key",
         "model": "Model to use for generation",
-        "default_prompt_prefix": "Default prompt prefix",
-        "no_api": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>API ключ не настроен!</b>',
-        "generating": '<a href="tg://emoji?id=5386367538735104399">⌛</a> <b>Генерирую...</b>\n<i>{}</i>',
-        "error": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>Ошибка:</b> <code>{}</code>',
-        "success": '<a href="tg://emoji?id=5427009714745517609">✅</a> <b>Готово!</b>\n<i>{}</i>',
-        "history_empty": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>История пуста!</b>',
+        "no_api": "❌ API ключ не настроен!",
+        "generating": "⌛ <b>Генерирую...</b>\nРазмер: {aspect}\n<i>{prompt}</i>",
+        "error": "❌ <b>Ошибка:</b> <code>{}</code>",
+        "success": "✅ <b>Готово!</b>\nРазмер: {aspect}\n<i>{prompt}</i>",
+        "history_empty": "❌ История пуста!",
+        "history_cleared": "✅ История очищена!",
     }
 
     def __init__(self):
         self.config = loader.ModuleConfig(
             loader.ConfigValue("api_key", "", lambda: self.strings("api_key"), validator=loader.validators.Hidden()),
             loader.ConfigValue("model", "nano-banana-pro-preview", lambda: self.strings("model")),
-            loader.ConfigValue("default_prompt_prefix", "", lambda: self.strings("default_prompt_prefix")),
         )
 
     async def client_ready(self, client, db):
         self._client = client
         self.db = db
 
-    async def _call_api(self, prompt: str):
+    async def _call_api(self, prompt: str, aspect: str = "1:1"):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config['model']}:generateContent?key={self.config['api_key']}"
-        full_prompt = f"{self.config['default_prompt_prefix']} {prompt}".strip()
+        
+        # Добавляем указание размера прямо в промпт для модели
+        ratio_map = {"1:1": "square 1:1", "16:9": "cinematic 16:9", "9:16": "vertical 9:16"}
+        full_prompt = f"Aspect ratio {ratio_map.get(aspect, '1:1')}. {prompt}"
+        
         payload = {
             "contents": [{"parts": [{"text": full_prompt}]}],
             "generationConfig": {"candidateCount": 1, "temperature": 1.0}
@@ -49,70 +52,121 @@ class ImageGenMod(loader.Module):
             async with session.post(url, json=payload, timeout=60) as resp:
                 if resp.status != 200:
                     text = await resp.text()
-                    raise ValueError(f"API Error {resp.status}: {text[:100]}")
+                    raise ValueError(f"API Error {resp.status}")
                 return await resp.json()
 
     @loader.command(ru_doc=" > Сгенерировать изображение")
     async def ig(self, message: Message):
-        """Generate image"""
+        """Generate image with aspect ratio selection"""
         args = utils.get_args_raw(message)
         if not args: return await utils.answer(message, "Введите промпт")
         if not self.config["api_key"]: return await utils.answer(message, self.strings("no_api"))
 
-        # Используем обычный ответ для статуса (надежнее всего)
-        status = await utils.answer(message, self.strings("generating").format(args))
+        kb = [
+            [
+                {"text": "Square (1:1)", "callback": self._regen_cb, "args": (args, "1:1")},
+                {"text": "Wide (16:9)", "callback": self._regen_cb, "args": (args, "16:9")},
+                {"text": "Tall (9:16)", "callback": self._regen_cb, "args": (args, "9:16")}
+            ]
+        ]
         
+        # Сразу запускаем стандартную генерацию 1:1
+        await self._process_gen(message, args, "1:1")
+
+    async def _process_gen(self, message, prompt, aspect, call=None):
+        status_text = self.strings("generating").format(prompt=prompt, aspect=aspect)
+        
+        # Если это новый запрос через команду
+        if not call:
+            status = await utils.answer(message, status_text)
+        else:
+            await call.edit(status_text)
+            status = call
+
         try:
-            data = await self._call_api(args)
-            
-            img_b64 = None
-            try:
-                img_b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-            except (KeyError, IndexError):
-                raise ValueError("No image in response. Safety filter?")
-
+            data = await self._call_api(prompt, aspect)
+            img_b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
             img_bytes = base64.b64decode(img_b64)
-            file = io.BytesIO(img_bytes)
-            file.name = "ai.png"
-
+            
             # Сохраняем в историю
             sid = str(uuid.uuid4())
             history = self.db.get("ImageGen", "history", [])
-            history.append({"id": sid, "prompt": args, "bytes": img_b64})
+            history.append({"id": sid, "prompt": prompt, "bytes": img_b64, "aspect": aspect})
             self.db.set("ImageGen", "history", history[-10:])
 
-            # Отправляем через Telethon (гарантированный успех)
+            file = io.BytesIO(img_bytes)
+            file.name = "ai.png"
+
+            # Кнопки для результата
+            kb = [[
+                {"text": "1:1", "callback": self._regen_cb, "args": (prompt, "1:1")},
+                {"text": "16:9", "callback": self._regen_cb, "args": (prompt, "16:9")},
+                {"text": "9:16", "callback": self._regen_cb, "args": (prompt, "9:16")}
+            ]]
+
+            # Отправляем файл. В Telethon id чата в call лежит в call.chat_id
+            target_chat = message.chat_id if not call else call.original_call.chat_instance
+            
+            # Чтобы избежать проблем с None чатом в истории, используем мега-надежный метод
+            chat_id = utils.get_chat_id(message)
+
             await self._client.send_file(
-                message.chat_id, 
+                chat_id, 
                 file, 
-                caption=self.strings("success").format(args),
-                reply_to=message.id
+                caption=self.strings("success").format(prompt=prompt, aspect=aspect),
+                buttons=utils.build_markup(kb)
             )
-            await status.delete()
+            
+            if not call: await status.delete()
+            else: await call.delete()
 
         except Exception as e:
             await utils.answer(status, self.strings("error").format(str(e)))
 
     @loader.command(ru_doc=" > История")
     async def ighist(self, message: Message):
-        """History"""
+        """View history"""
         history = self.db.get("ImageGen", "history", [])
         if not history: return await utils.answer(message, self.strings("history_empty"))
         
         kb = []
         for e in reversed(history):
-            kb.append([{"text": f"🖼 {e['prompt'][:30]}", "callback": self._hist_cb, "args": (e['id'],)}])
+            kb.append([{"text": f"🖼 {e['prompt'][:25]} ({e['aspect']})", "callback": self._hist_cb, "args": (e['id'],)}])
         
-        await self.inline.form("<b>📝 История:</b>", message=message, reply_markup=kb)
+        kb.append([{"text": "🧹 Очистить историю", "callback": self._clear_all_cb}])
+        await self.inline.form("<b>📝 История генераций:</b>", message=message, reply_markup=kb)
+
+    async def _regen_cb(self, call: InlineCall, prompt, aspect):
+        await call.answer(f"Генерирую {aspect}...")
+        await self._process_gen(call.message, prompt, aspect, call=call)
 
     async def _hist_cb(self, call: InlineCall, sid):
-        await call.answer("Отправляю...")
         history = self.db.get("ImageGen", "history", [])
         sess = next((i for i in history if i["id"] == sid), None)
         
-        if sess:
-            file = io.BytesIO(base64.b64decode(sess["bytes"]))
-            file.name = "hist.png"
-            await self._client.send_file(call.original_call.message.chat.id, file, caption=f"Из истории: {sess['prompt']}")
-        else:
-            await call.answer("Не найдено", show_alert=True)
+        if not sess:
+            return await call.answer("Не найдено", show_alert=True)
+
+        await call.answer("Отправляю изображение из истории...")
+        
+        file = io.BytesIO(base64.b64decode(sess["bytes"]))
+        file.name = "hist.png"
+        
+        # Используем безопасный метод получения чата
+        try:
+            chat_id = call.original_call.message.chat.id
+        except AttributeError:
+            # Если это инлайн сообщение без прямого доступа к чату
+            await call.answer("Ошибка: не удалось определить чат. Попробуй вызвать команду .ighist заново.", show_alert=True)
+            return
+
+        await self._client.send_file(
+            chat_id, 
+            file, 
+            caption=f"📜 <b>Из истории</b>\nПромпт: <i>{sess['prompt']}</i>\nРазмер: {sess['aspect']}"
+        )
+
+    async def _clear_all_cb(self, call: InlineCall):
+        self.db.set("ImageGen", "history", [])
+        await call.edit(self.strings("history_cleared"), reply_markup=[])
+        await call.answer("История очищена")
