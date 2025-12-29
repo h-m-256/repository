@@ -1,5 +1,5 @@
 #meta developer: @h_m_256
-#🔑 копурайт геймини 3 флеш/про
+#🔑 геймини 3 флеш/про
 
 import asyncio
 import aiohttp
@@ -14,7 +14,7 @@ from ..inline.types import InlineCall
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """AI Image Generation & History with Google Models"""
+    """генерация изображений крч"""
 
     strings = {
         "name": "ImageGen",
@@ -80,7 +80,12 @@ class ImageGenMod(loader.Module):
         """Generate/Edit image"""
         args = utils.get_args_raw(message)
         reply = await message.get_reply_message()
-        photo = await (message.download_media(bytes) if message.photo else (reply.download_media(bytes) if reply and reply.photo else None))
+        
+        photo = None
+        if message.photo:
+            photo = await message.download_media(bytes)
+        elif reply and reply.photo:
+            photo = await reply.download_media(bytes)
 
         if not args and not photo: return await utils.answer(message, self.strings("usage"))
         if not self.config["api_key"]: return await utils.answer(message, self.strings("no_api"))
@@ -92,7 +97,12 @@ class ImageGenMod(loader.Module):
             data = await self._call_api(prompt, photo)
             history = self.db.get("ImageGen", "history", [])
             sid = str(uuid.uuid4())
-            history.append({"id": sid, "prompt": prompt, "data": data, "photo": base64.b64encode(photo).decode() if photo else None})
+            history.append({
+                "id": sid, 
+                "prompt": prompt, 
+                "data": data, 
+                "photo": base64.b64encode(photo).decode() if photo else None
+            })
             self.db.set("ImageGen", "history", history[-20:])
             await self._render(message, sid, status_msg)
         except Exception as e:
@@ -103,20 +113,19 @@ class ImageGenMod(loader.Module):
         """History"""
         history = self.db.get("ImageGen", "history", [])
         if not history: return await utils.answer(message, self.strings("history_empty"))
+        
         kb = [[{"text": f"🖼 {e['prompt'][:30]}", "callback": self._hist_cb, "args": (e['id'],)}] for e in reversed(history)]
+        kb.append([{"text": "🧹 Очистить историю", "callback": self._clear_all_cb}])
+        
         await self.inline.form(self.strings("history_title"), message=message, reply_markup=kb)
 
-    async def _render(self, message, sid, status_msg=None):
+    async def _render(self, message, sid, status_msg=None, call: InlineCall = None):
         history = self.db.get("ImageGen", "history", [])
         sess = next((i for i in history if i["id"] == sid), None)
         
-        target = status_msg or message
-
-        if not sess:
-            err = self.strings("error").format("Session not found")
-            return await (target.edit(err) if hasattr(target, 'edit') else utils.answer(message, err))
-
         try:
+            if not sess: raise ValueError("Session not found")
+
             img_b64 = None
             candidates = sess.get("data", {}).get("candidates", [])
             if candidates:
@@ -126,8 +135,7 @@ class ImageGenMod(loader.Module):
                         img_b64 = p["inlineData"].get("data")
                         break
             
-            if not img_b64:
-                raise KeyError("No inlineData found")
+            if not img_b64: raise ValueError("No image in response")
 
             file = io.BytesIO(base64.b64decode(img_b64))
             file.name = "ai.png"
@@ -139,21 +147,34 @@ class ImageGenMod(loader.Module):
             
             if status_msg: await status_msg.delete()
             
-            await self.inline.form(self.strings("success").format(sess["prompt"]), message=message, file=file, reply_markup=kb)
+            await self.inline.form(
+                self.strings("success").format(sess["prompt"]), 
+                message=message, 
+                file=file, 
+                reply_markup=kb
+            )
             
-        except Exception:
-            err_msg = self.strings("error").format("No image data in response. Content might be filtered.")
-            if hasattr(target, 'edit'): await target.edit(err_msg)
-            else: await utils.answer(message, err_msg)
+        except Exception as e:
+            err_msg = self.strings("error").format(str(e))
+            if call:
+                await call.answer(err_msg, show_alert=True)
+            elif status_msg:
+                await status_msg.edit(err_msg)
+            else:
+                await utils.answer(message, err_msg)
 
     async def _hist_cb(self, call: InlineCall, sid):
-        await self._render(call.message, sid)
+        await self._render(call.message, sid, call=call)
 
     async def _del_cb(self, call: InlineCall, sid):
         history = self.db.get("ImageGen", "history", [])
         history = [i for i in history if i["id"] != sid]
         self.db.set("ImageGen", "history", history)
         await call.delete()
+
+    async def _clear_all_cb(self, call: InlineCall):
+        self.db.set("ImageGen", "history", [])
+        await call.edit(self.strings("history_empty"))
 
     async def _regen_cb(self, call: InlineCall, sid):
         history = self.db.get("ImageGen", "history", [])
@@ -167,6 +188,6 @@ class ImageGenMod(loader.Module):
             new_data = await self._call_api(history[idx]["prompt"], photo)
             history[idx]["data"] = new_data
             self.db.set("ImageGen", "history", history)
-            await self._render(call.message, sid)
+            await self._render(call.message, sid, call=call)
         except Exception as e:
             await call.answer(f"Error: {str(e)[:100]}", show_alert=True)
