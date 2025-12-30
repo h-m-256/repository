@@ -12,7 +12,7 @@ from ..inline.types import InlineCall
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """AI Image Generation with Stable History"""
+    """AI Image Generation (Stable Inline Version)"""
 
     strings = {
         "name": "ImageGen",
@@ -44,8 +44,7 @@ class ImageGenMod(loader.Module):
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, timeout=60) as resp:
                 if resp.status != 200:
-                    text = await resp.text()
-                    raise ValueError(f"API Error {resp.status}")
+                    return None
                 return await resp.json()
 
     @loader.command(ru_doc=" > Сгенерировать изображение")
@@ -55,65 +54,41 @@ class ImageGenMod(loader.Module):
         if not args: return await utils.answer(message, "Введите промпт")
         if not self.config["api_key"]: return await utils.answer(message, "Настрой API ключ!")
         
-        await self._process_gen(message, args)
+        # Создаем начальную форму (как в Limoka)
+        msg = await self.inline.form(
+            text=self.strings("generating").format(args),
+            message=message
+        )
+        await self._process_gen(msg, args)
 
-    async def _process_gen(self, message, prompt, call=None):
-        # 1. Информируем пользователя
-        if call:
-            await call.answer("Генерирую...")
-            # В инлайне редактируем текст на статус загрузки
-            await call.edit(self.strings("generating").format(prompt))
-        else:
-            status = await utils.answer(message, self.strings("generating").format(prompt))
-
+    async def _process_gen(self, target, prompt):
+        """target может быть InlineMessage или InlineCall"""
         try:
-            # 2. Получаем данные от API
             data = await self._call_api(prompt)
+            if not data:
+                raise ValueError("API Error or Safety Block")
+                
             img_b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
             img_bytes = base64.b64decode(img_b64)
             
-            # 3. Сохраняем в историю
+            # Сохраняем в историю
             sid = str(uuid.uuid4())
             history = self.db.get("ImageGen", "history", [])
             history.append({"id": sid, "prompt": prompt, "bytes": img_b64})
             self.db.set("ImageGen", "history", history[-10:])
 
-            # 4. Формируем файл
-            file = io.BytesIO(img_bytes)
-            file.name = "ai.png"
+            # Формируем кнопки для инлайна (список словарей)
+            kb = [[{"text": "🔄 Перегенерировать", "callback": self._regen_cb, "args": (prompt,)}]]
 
-            # 5. Кнопки (Формат Telethon для send_file)
-            # В Heroku/Hikka мы используем build_reply_markup из клиента
-            buttons = self._client.build_reply_markup([
-                [{"text": "🔄 Перегенерировать", "callback": self._regen_cb, "args": (prompt,)}]
-            ])
-
-            # Определение ID чата (самый стабильный метод)
-            chat_id = utils.get_chat_id(message)
-
-            # 6. Отправка результата
-            await self._client.send_file(
-                chat_id,
-                file,
-                caption=self.strings("success").format(prompt),
-                buttons=buttons
+            # В Hikka/Heroku редактирование с фото через inline.form делается так:
+            await target.edit(
+                text=self.strings("success").format(prompt),
+                photo=img_bytes,
+                reply_markup=kb
             )
-            
-            # Удаляем статусное сообщение
-            if not call:
-                await status.delete()
-            else:
-                try:
-                    await call.delete()
-                except:
-                    pass
 
         except Exception as e:
-            err_msg = self.strings("error").format(str(e))
-            if not call:
-                await utils.answer(status, err_msg)
-            else:
-                await call.edit(err_msg)
+            await target.edit(self.strings("error").format(str(e)[:100]), reply_markup=[])
 
     @loader.command(ru_doc=" > История")
     async def ighist(self, message: Message):
@@ -129,8 +104,9 @@ class ImageGenMod(loader.Module):
         await self.inline.form("<b>📝 История генераций:</b>", message=message, reply_markup=kb)
 
     async def _regen_cb(self, call: InlineCall, prompt):
-        # Передаем оригинальное сообщение для контекста чата
-        await self._process_gen(call.message, prompt, call=call)
+        await call.answer("Генерирую новый вариант...")
+        await call.edit(self.strings("generating").format(prompt))
+        await self._process_gen(call, prompt)
 
     async def _hist_cb(self, call: InlineCall, sid):
         history = self.db.get("ImageGen", "history", [])
@@ -139,25 +115,18 @@ class ImageGenMod(loader.Module):
         if not sess:
             return await call.answer("Запись не найдена", show_alert=True)
 
-        await call.answer("Отправляю...")
-        file = io.BytesIO(base64.b64decode(sess["bytes"]))
-        file.name = "hist.png"
+        await call.answer("Загружаю из истории...")
         
-        # Безопасное получение chat_id для инлайна
-        chat_id = utils.get_chat_id(call.message)
+        # Редактируем текущее окно истории, превращая его в просмотр фото
+        img_bytes = base64.b64decode(sess["bytes"])
+        kb = [[{"text": "🔄 Перегенерировать", "callback": self._regen_cb, "args": (sess['prompt'],)}]]
         
-        buttons = self._client.build_reply_markup([
-            [{"text": "🔄 Перегенерировать", "callback": self._regen_cb, "args": (sess['prompt'],)}]
-        ])
-
-        await self._client.send_file(
-            chat_id, 
-            file, 
-            caption=f"📜 <b>Из истории</b>\n<i>{sess['prompt']}</i>",
-            buttons=buttons
+        await call.edit(
+            text=f"📜 <b>Из истории</b>\n<i>{sess['prompt']}</i>",
+            photo=img_bytes,
+            reply_markup=kb
         )
 
     async def _clear_all_cb(self, call: InlineCall):
         self.db.set("ImageGen", "history", [])
-        await call.edit(self.strings("history_cleared"))
-        await call.answer("Очищено")
+        await call.edit(self.strings("history_cleared"), reply_markup=[])
