@@ -1,11 +1,9 @@
-#meta developer: @h_m_256
+# meta developer: @h_m_256
 
-import asyncio
 import aiohttp
-import io
 import base64
-import json
 import uuid
+from aiogram.types import BufferedInputFile
 from .. import loader, utils
 from telethon.tl.types import Message
 from ..inline.types import InlineCall
@@ -23,6 +21,8 @@ class ImageGenMod(loader.Module):
         "success": "✅ <b>Готово!</b>\n<i>{}</i>",
         "history_empty": "❌ История пуста!",
         "history_cleared": "✅ История очищена!",
+        "history_item": "🖼 <b>Просмотр из истории</b>\n<i>{}</i>",
+        "no_api": "❌ <b>Не установлен API ключ!</b>\nВведи команду конфигурации или установи его в конфиге."
     }
 
     def __init__(self):
@@ -44,68 +44,111 @@ class ImageGenMod(loader.Module):
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, timeout=60) as resp:
                 if resp.status != 200:
-                    return None
+                    try:
+                        err = await resp.json()
+                        return {"error": err.get("error", {}).get("message", f"HTTP {resp.status}")}
+                    except:
+                        return {"error": f"HTTP Error {resp.status}"}
                 return await resp.json()
 
-    @loader.command(ru_doc=" > Сгенерировать изображение")
+    @loader.command(ru_doc="<промпт> - Сгенерировать изображение")
     async def ig(self, message: Message):
         """Generate image with stable regenerate button"""
         args = utils.get_args_raw(message)
-        if not args: return await utils.answer(message, "Введите промпт")
-        if not self.config["api_key"]: return await utils.answer(message, "Настрой API ключ!")
+        if not args:
+            return await utils.answer(message, "Введите промпт")
+        if not self.config["api_key"]:
+            return await utils.answer(message, self.strings("no_api"))
         
-        # Создаем начальную форму (как в Limoka)
+        # Экранируем HTML в промпте, чтобы не сломать разметку сообщения
+        safe_args = utils.escape_html(args)
+
+        # Создаем форму ожидания
         msg = await self.inline.form(
-            text=self.strings("generating").format(args),
+            text=self.strings("generating").format(safe_args),
             message=message
         )
+        
+        # Запускаем процесс генерации
         await self._process_gen(msg, args)
 
     async def _process_gen(self, target, prompt):
-        """target может быть InlineMessage или InlineCall"""
+        """
+        target: InlineMessage (от inline.form) или InlineCall (от кнопки)
+        prompt: сырой текст запроса
+        """
         try:
             data = await self._call_api(prompt)
+            
             if not data:
-                raise ValueError("API Error or Safety Block")
-                
-            img_b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+                raise ValueError("Empty response from API")
+            
+            if "error" in data:
+                raise ValueError(data["error"])
+
+            # Проверяем структуру ответа (Google Gemini Vision/Imagen format)
+            try:
+                img_b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+            except (KeyError, IndexError):
+                raise ValueError("API не вернуло изображение. Возможно, модель не поддерживает генерацию или сработал Safety Filter.")
+
             img_bytes = base64.b64decode(img_b64)
             
             # Сохраняем в историю
             sid = str(uuid.uuid4())
             history = self.db.get("ImageGen", "history", [])
+            # Сохраняем только последние 10 записей
             history.append({"id": sid, "prompt": prompt, "bytes": img_b64})
             self.db.set("ImageGen", "history", history[-10:])
 
-            # Формируем кнопки для инлайна (список словарей)
+            # Формируем объект файла для Aiogram 3.x
+            # Это ключевой момент, который исправляет ошибку 'Abstract InputFile'
+            photo_file = BufferedInputFile(img_bytes, filename=f"{sid}.png")
+
+            # Кнопки
             kb = [[{"text": "🔄 Перегенерировать", "callback": self._regen_cb, "args": (prompt,)}]]
 
-            # В Hikka/Heroku редактирование с фото через inline.form делается так:
+            safe_prompt = utils.escape_html(prompt)
+            
+            # Редактируем сообщение
             await target.edit(
-                text=self.strings("success").format(prompt),
-                photo=img_bytes,
+                text=self.strings("success").format(safe_prompt),
+                photo=photo_file,
                 reply_markup=kb
             )
 
         except Exception as e:
-            await target.edit(self.strings("error").format(str(e)[:100]), reply_markup=[])
+            # Если произошла ошибка, выводим её в инлайн окне
+            error_text = utils.escape_html(str(e)[:200])
+            await target.edit(
+                text=self.strings("error").format(error_text),
+                reply_markup=[[{"text": "🔙 Закрыть", "action": "close"}]]
+            )
 
-    @loader.command(ru_doc=" > История")
+    @loader.command(ru_doc=" - История генераций")
     async def ighist(self, message: Message):
         """View history"""
         history = self.db.get("ImageGen", "history", [])
-        if not history: return await utils.answer(message, self.strings("history_empty"))
+        if not history:
+            return await utils.answer(message, self.strings("history_empty"))
         
         kb = []
         for e in reversed(history):
-            kb.append([{"text": f"🖼 {e['prompt'][:30]}", "callback": self._hist_cb, "args": (e['id'],)}])
+            # Обрезаем длинные промпты для красивой кнопки
+            prompt_preview = (e['prompt'][:25] + '..') if len(e['prompt']) > 25 else e['prompt']
+            kb.append([{"text": f"🖼 {prompt_preview}", "callback": self._hist_cb, "args": (e['id'],)}])
         
-        kb.append([{"text": "🧹 Очистить историю", "callback": self._clear_all_cb}])
+        kb.append([{"text": "🗑 Очистить всё", "callback": self._clear_all_cb}])
+        kb.append([{"text": "❌ Закрыть", "action": "close"}])
+        
         await self.inline.form("<b>📝 История генераций:</b>", message=message, reply_markup=kb)
 
     async def _regen_cb(self, call: InlineCall, prompt):
+        safe_prompt = utils.escape_html(prompt)
+        # Уведомление внизу экрана
         await call.answer("Генерирую новый вариант...")
-        await call.edit(self.strings("generating").format(prompt))
+        # Меняем текст и убираем кнопки, чтобы не жали повторно
+        await call.edit(self.strings("generating").format(safe_prompt), reply_markup=[])
         await self._process_gen(call, prompt)
 
     async def _hist_cb(self, call: InlineCall, sid):
@@ -113,20 +156,50 @@ class ImageGenMod(loader.Module):
         sess = next((i for i in history if i["id"] == sid), None)
         
         if not sess:
-            return await call.answer("Запись не найдена", show_alert=True)
+            return await call.answer("Запись устарела или удалена", show_alert=True)
 
-        await call.answer("Загружаю из истории...")
+        await call.answer("Загружаю...")
         
-        # Редактируем текущее окно истории, превращая его в просмотр фото
-        img_bytes = base64.b64decode(sess["bytes"])
-        kb = [[{"text": "🔄 Перегенерировать", "callback": self._regen_cb, "args": (sess['prompt'],)}]]
+        try:
+            img_bytes = base64.b64decode(sess["bytes"])
+            # Используем BufferedInputFile для фикса ошибки ядра
+            photo_file = BufferedInputFile(img_bytes, filename=f"{sid}.png")
+            
+            safe_prompt = utils.escape_html(sess['prompt'])
+            
+            kb = [
+                [{"text": "🔄 Перегенерировать", "callback": self._regen_cb, "args": (sess['prompt'],)}],
+                [{"text": "🔙 К списку", "callback": self._back_to_hist_cb}]
+            ]
+            
+            await call.edit(
+                text=self.strings("history_item").format(safe_prompt),
+                photo=photo_file,
+                reply_markup=kb
+            )
+        except Exception as e:
+            await call.answer(f"Ошибка загрузки: {e}", show_alert=True)
+
+    async def _back_to_hist_cb(self, call: InlineCall):
+        # Возвращает меню истории (без картинки, только текст)
+        history = self.db.get("ImageGen", "history", [])
+        if not history:
+             return await call.edit(self.strings("history_empty"), reply_markup=[[{"text": "Close", "action": "close"}]])
+
+        kb = []
+        for e in reversed(history):
+            prompt_preview = (e['prompt'][:25] + '..') if len(e['prompt']) > 25 else e['prompt']
+            kb.append([{"text": f"🖼 {prompt_preview}", "callback": self._hist_cb, "args": (e['id'],)}])
         
-        await call.edit(
-            text=f"📜 <b>Из истории</b>\n<i>{sess['prompt']}</i>",
-            photo=img_bytes,
-            reply_markup=kb
-        )
+        kb.append([{"text": "🗑 Очистить всё", "callback": self._clear_all_cb}])
+        kb.append([{"text": "❌ Закрыть", "action": "close"}])
+
+        # При переходе от фото к тексту, photo=None не уберет фото в edit, 
+        # но edit_message_text (который вызывается внутри ядра при отсутствии media) это сделает.
+        # Однако ядро hikka может капризничать при смене типа медиа -> текст. 
+        # Если это не сработает, нужно переоткрывать форму, но попробуем так:
+        await call.edit("<b>📝 История генераций:</b>", reply_markup=kb)
 
     async def _clear_all_cb(self, call: InlineCall):
         self.db.set("ImageGen", "history", [])
-        await call.edit(self.strings("history_cleared"), reply_markup=[])
+        await call.edit(self.strings("history_cleared"), reply_markup=[[{"text": "Закрыть", "action": "close"}]])
