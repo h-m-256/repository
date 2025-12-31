@@ -1,4 +1,4 @@
-# meta developer: h_m_256.t.me
+# meta developer: @h_m_256
 # meta banner: https://envs.sh/H5B.jpg
 
 from .. import loader, utils
@@ -64,7 +64,7 @@ def is_barcode(text: str) -> bool:
 
 @loader.tds
 class BarcodeLangMod(loader.Module):
-    """Порт шрихкодового языка. Автор оригинала: @roflplugins"""
+    """штрихкод язык"""
 
     strings = {
         "name": "BarcodeLang",
