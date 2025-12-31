@@ -1,5 +1,5 @@
 # meta developer: @h_m_256
-
+# все снизу написано с помощью ии
 import aiohttp
 import base64
 import uuid
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """AI Image Generation (Stable Inline Version with URL Bypass)"""
+    """генератор изображений через модели гугл☃️"""
 
     strings = {
         "name": "ImageGen",
@@ -87,8 +87,6 @@ class ImageGenMod(loader.Module):
 
         safe_args = utils.escape_html(args)
 
-        # Начинаем с формы. Если бот перезагрузится, эта форма перестанет отвечать на кнопки,
-        # но это неизбежно для RAM-хранилища.
         msg = await self.inline.form(
             text=self.strings("generating").format(safe_args),
             message=message
@@ -98,7 +96,6 @@ class ImageGenMod(loader.Module):
 
     async def _process_gen(self, target, prompt):
         try:
-            # 1. Запрос к AI
             data = await self._call_api(prompt)
 
             if not data or "error" in data:
@@ -111,32 +108,26 @@ class ImageGenMod(loader.Module):
 
             img_bytes = base64.b64decode(img_b64)
 
-            # 2. Сохранение в историю (храним base64 для быстродействия истории)
             sid = str(uuid.uuid4())
             history = self.db.get("ImageGen", "history", [])
             history.append({"id": sid, "prompt": prompt, "bytes": img_b64})
             self.db.set("ImageGen", "history", history[-10:])
 
-            # 3. Обход сломанного ядра: Загрузка на Catbox
-            # Мы обновляем сообщение, чтобы юзер видел прогресс
             try:
                 await target.edit(self.strings("uploading"))
             except:
-                pass # Игнорируем, если не удалось обновить текст (не критично)
+                pass
 
             img_url = await self._upload_to_catbox(img_bytes)
 
             if not img_url:
-                # Фолбэк (на всякий случай, если кэтбокс лежит): пробуем просто текст
                 raise ValueError("Ошибка загрузки изображения на сервер.")
 
-            # 4. Вывод результата
             kb = [[{"text": self.strings("btn_regen"), "callback": self._regen_cb, "args": (prompt,)}],
                   [{"text": self.strings("btn_close"), "action": "close"}]]
 
             safe_prompt = utils.escape_html(prompt)
 
-            # Передаем URL в photo. Ядро увидит строку и не будет пытаться делать InputFile(io.BytesIO)
             status = await target.edit(
                 text=self.strings("success").format(safe_prompt),
                 photo=img_url,
@@ -144,7 +135,6 @@ class ImageGenMod(loader.Module):
             )
 
             if not status:
-                # Если edit вернул False (тихая ошибка ядра)
                 await target.edit(
                     text=f"{self.strings('success').format(safe_prompt)}\n\n⚠️ <b>Не удалось загрузить превью (ошибка ядра), но вот ссылка:</b> {img_url}",
                     reply_markup=kb
@@ -153,7 +143,6 @@ class ImageGenMod(loader.Module):
         except Exception as e:
             logger.exception("ImageGen Process Error")
             error_text = utils.escape_html(str(e)[:200])
-            # Восстанавливаем кнопки, чтобы интерфейс не завис
             kb = [[{"text": self.strings("btn_regen"), "callback": self._regen_cb, "args": (prompt,)}],
                   [{"text": self.strings("btn_close"), "action": "close"}]]
 
@@ -185,13 +174,9 @@ class ImageGenMod(loader.Module):
         if isinstance(call_or_msg, Message):
             await self.inline.form(text, message=call_or_msg, reply_markup=kb)
         else:
-            # Это InlineCall
-            # Важно: если мы переходим от фото к тексту, edit может сбоить в некоторых ядрах.
-            # Попробуем передать photo=None явно, если ядро это поддерживает, или просто text.
             await call_or_msg.edit(text, reply_markup=kb, photo="")
 
-    async def _regen_cb(self, call: InlineCall, prompt):
-        # Проверяем, жива ли сессия (обычно да, раз колбэк сработал)
+    async def _regen_cb(self, call: InlineCall,
         safe_prompt = utils.escape_html(prompt)
         await call.answer("Генерирую...")
         await call.edit(self.strings("generating").format(safe_prompt), reply_markup=[])
@@ -207,8 +192,6 @@ class ImageGenMod(loader.Module):
         await call.answer("Загружаю...")
 
         try:
-            # Загружаем картинку заново на кэтбокс, так как в базе храним только base64
-            # (ссылки кэтбокса вечные, но мы их не храним, чтобы базу не путать, хотя можно было бы)
             img_bytes = base64.b64decode(sess["bytes"])
             img_url = await self._upload_to_catbox(img_bytes)
 
