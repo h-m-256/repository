@@ -1,5 +1,5 @@
 # meta developer: @h_m_256
-# все снизу написано с помощью ии
+# все снизу написано ии ☃️
 import aiohttp
 import base64
 import uuid
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """генератор изображений через модели гугл☃️"""
+    """генерация изображений через модели гугл"""
 
     strings = {
         "name": "ImageGen",
@@ -176,7 +176,7 @@ class ImageGenMod(loader.Module):
         else:
             await call_or_msg.edit(text, reply_markup=kb, photo="")
 
-    async def _regen_cb(self, call: InlineCall,
+    async def _regen_cb(self, call: InlineCall, prompt):
         safe_prompt = utils.escape_html(prompt)
         await call.answer("Генерирую...")
         await call.edit(self.strings("generating").format(safe_prompt), reply_markup=[])
