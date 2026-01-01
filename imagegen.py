@@ -49,9 +49,8 @@ class ImageGenMod(loader.Module):
     def __init__(self):
         self.config = loader.ModuleConfig(
             loader.ConfigValue("api_key", "", lambda: self.strings("api_key"), validator=loader.validators.Hidden()),
-            loader.ConfigValue("model", "nano-banana-pro-preview", lambda: self.strings("model"), validator=loader.validators.Choice([
-                "gemini-2.0-flash-exp",
-                "gemini-2.5-flash-image",
+            # Дефолт на 2.5 Flash, убрали 2.0
+            loader.ConfigValue("model", "gemini-2.5-flash-image-preview", lambda: self.strings("model"), validator=loader.validators.Choice([
                 "gemini-2.5-flash-image-preview",
                 "gemini-3-pro-image-preview",
                 "nano-banana-pro-preview",
@@ -73,14 +72,13 @@ class ImageGenMod(loader.Module):
         """Resize image to reduce tokens and avoid 429 Resource Exhausted"""
         try:
             img = Image.open(io.BytesIO(img_bytes))
-            # Максимальный размер 1024x1024, сохраняем пропорции
-            img.thumbnail((1024, 1024))
+            # 800px - оптимально для квоты и качества
+            img.thumbnail((800, 800))
             
             out = io.BytesIO()
-            # Конвертируем в JPEG для уменьшения веса (PNG слишком тяжелый для токенов)
             if img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
-            img.save(out, format='JPEG', quality=85)
+            img.save(out, format='JPEG', quality=75)
             return out.getvalue()
         except Exception as e:
             logger.error(f"Resize failed: {e}")
@@ -127,15 +125,15 @@ class ImageGenMod(loader.Module):
 
     async def _call_api(self, prompt: str, input_image_bytes=None):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config['model']}:generateContent?key={self.config['api_key']}"
+        
         parts = [{"text": prompt}]
         
         if input_image_bytes:
-            # Сжимаем картинку перед отправкой
             resized_bytes = await utils.run_sync(self._resize_image, input_image_bytes)
             b64_img = base64.b64encode(resized_bytes).decode('utf-8')
             parts.insert(0, {"inlineData": {"mimeType": "image/jpeg", "data": b64_img}})
 
-        # Настройки безопасности: разрешаем всё (BLOCK_NONE)
+        # Отключаем цензуру
         safety_settings = [
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
             {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -150,19 +148,25 @@ class ImageGenMod(loader.Module):
             "generationConfig": {"candidateCount": 1, "temperature": 1.0}
         }
         
+        # Retry Logic
+        max_retries = 3
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=90) as resp:
+            for attempt in range(max_retries):
                 try:
-                    return await resp.json()
-                except:
-                    return {"error": {"message": f"HTTP {resp.status}"}}
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=90) as resp:
-                try:
-                    return await resp.json()
-                except:
-                    return {"error": {"message": f"HTTP {resp.status}"}}
+                    async with session.post(url, json=payload, timeout=90) as resp:
+                        if resp.status == 429:
+                            wait_time = (attempt + 1) * 2
+                            await asyncio.sleep(wait_time)
+                            continue
+                        
+                        try:
+                            return await resp.json()
+                        except:
+                            return {"error": {"message": f"HTTP {resp.status}"}}
+                except Exception as e:
+                    return {"error": {"message": str(e)}}
+            
+            return {"error": {"message": "Resource exhausted (429) after retries."}}
 
     # --- COMMANDS ---
 
@@ -175,11 +179,9 @@ class ImageGenMod(loader.Module):
         if not self.config["api_key"]:
             return await utils.answer(message, self.strings("no_api"))
         
-        # Разделяем промпт для API и для отображения
         user_prompt = args.strip()
-        # Если аргументов нет, но есть префикс - используем его как промпт, но в UI пусто
         if not user_prompt:
-             user_prompt = "..." # Заглушка для UI если только префикс
+             user_prompt = "..."
 
         api_prompt = (self.config["prefix"] + " " + args).strip()
         
@@ -236,7 +238,6 @@ class ImageGenMod(loader.Module):
             
             hist_id = str(uuid.uuid4())
             history = self.db.get("ImageGen", "history", [])
-            # Сохраняем в историю display_prompt (без префикса)
             history.append({"id": hist_id, "prompt": display_prompt, "bytes": img_b64})
             self.db.set("ImageGen", "history", history[-30:])
 
@@ -280,23 +281,9 @@ class ImageGenMod(loader.Module):
         file = io.BytesIO(content.encode('utf-8'))
         file.name = "error_log.txt"
         
-        chat_id = getattr(call, "chat_id", None)
-        if not chat_id and call.message:
-            chat_id = call.message.chat_id
-        
-        if not chat_id:
-             try:
-                 chat = await call.get_chat()
-                 chat_id = chat.id
-             except:
-                 return await call.answer("Не удалось определить чат", show_alert=True)
-
         try:
-            await self._client.send_file(
-                chat_id,
-                file,
-                caption=self.strings("log_caption")
-            )
+            # Используем reply на сообщение с ошибкой - самый надежный метод
+            await call.message.reply(file=file, text=self.strings("log_caption"))
             await call.answer("Sent!")
         except Exception as e:
             await call.answer(f"Failed to send: {e}", show_alert=True)
@@ -307,7 +294,6 @@ class ImageGenMod(loader.Module):
         idx = s["index"]
         total = len(s["images"])
         img_url = s["images"][idx]
-        # Показываем промпт без префикса
         safe_prompt = utils.escape_html(s["display_prompt"])
         
         nav_row = []
@@ -371,7 +357,6 @@ class ImageGenMod(loader.Module):
         history = self.db.get("ImageGen", "history", [])
         
         if not history:
-            # Если история пуста, всегда обновляем текущее сообщение или шлем новое
             text = self.strings("history_empty")
             kb = [[{"text": self.strings("btn_close"), "callback": self._safe_close}]]
             try:
@@ -396,13 +381,11 @@ class ImageGenMod(loader.Module):
         text = "<b>📝 История генераций:</b>"
 
         if force_new:
-            # Удаляем старое (с картинкой) и шлем новое (чистый текст)
             try:
                 chat_id = target.message.chat.id
                 await target.delete()
                 await self._client.send_message(chat_id, text, reply_markup=self.inline.generate_markup(kb))
             except:
-                # Если удалить не вышло, пробуем редактировать
                 await target.edit(text, reply_markup=kb)
         else:
             await target.edit(text, reply_markup=kb)
@@ -440,7 +423,6 @@ class ImageGenMod(loader.Module):
         if not img_url:
             return await call.answer("Ошибка загрузки изображения", show_alert=True)
 
-        # Берем prompt. Если это старая запись без разделения, берем как есть
         safe_prompt = utils.escape_html(item.get('prompt', 'image'))
         
         nav = []
@@ -494,10 +476,6 @@ class ImageGenMod(loader.Module):
 
     async def _regen_from_hist(self, call: InlineCall, prompt):
         sid = str(uuid.uuid4())
-        # При регене из истории считаем, что промпт уже "чистый" (без префикса)
-        # Если нужно снова добавить префикс - раскомментируй ниже, но лучше пусть будет как было в истории
-        # api_prompt = (self.config["prefix"] + " " + prompt).strip()
-        
         self.sessions[sid] = {
             "api_prompt": prompt, 
             "display_prompt": prompt, 
