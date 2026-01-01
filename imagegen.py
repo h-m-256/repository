@@ -35,7 +35,7 @@ class ImageGenMod(loader.Module):
         "btn_back": "🔙 Меню",
         "btn_clear": "🗑 Очистить",
         "btn_close": "❌ Закрыть",
-        "btn_loading": "⌛ Генерация...",
+        "btn_loading": "🕘",
         "btn_slideshow": "🎞 Режим просмотра",
     }
 
