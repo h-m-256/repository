@@ -1,5 +1,7 @@
 # meta developer: @h_m_256
-# 
+##########
+# 🔑 ключ
+##########
 import aiohttp
 import base64
 import uuid
@@ -62,13 +64,13 @@ class ImageGenMod(loader.Module):
         self.url_cache = {}
         self.error_cache = {}
 
-    [...](asc_slot://start-slot-9)async def client_ready(self, client, db):
+    async def client_ready(self, client, db):
         self._client = client
         self.db = db
 
     # --- UPLOADERS ---
 
-    [...](asc_slot://start-slot-11)async def _up_catbox(self, session, img_bytes):
+    async def _up_catbox(self, session, img_bytes):
         data = aiohttp.FormData()
         data.add_field('reqtype', 'fileupload')
         data.add_field('fileToUpload', img_bytes, filename='image.png', content_type='image/png')
@@ -106,15 +108,15 @@ class ImageGenMod(loader.Module):
 
     # --- API ---
 
-    [...](asc_slot://start-slot-13)async def _call_api(self, prompt: str, input_image_bytes=None):
+    async def _call_api(self, prompt: str, input_image_bytes=None):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config['model']}:generateContent?key={self.config['api_key']}"
         parts = [{"text": prompt}]
         
-        [...](asc_slot://start-slot-15)if input_image_bytes:
+        if input_image_bytes:
             b64_img = base64.b64encode(input_image_bytes).decode('utf-8')
             parts.insert(0, {"inlineData": {"mimeType": "image/jpeg", "data": b64_img}})
 
-        [...](asc_slot://start-slot-17)payload = {
+        payload = {
             "contents": [{"parts": parts}],
             "generationConfig": {"candidateCount": 1, "temperature": 1.0}
         }
@@ -137,8 +139,7 @@ class ImageGenMod(loader.Module):
         if not self.config["api_key"]:
             return await utils.answer(message, self.strings("no_api"))
         
-        [...](asc_slot://start-slot-19)full_prompt = (self.config["prefix"] + " " + args).strip()
-        # safe_prompt для UI не нужен в статусе загрузки
+        full_prompt = (self.config["prefix"] + " " + args).strip()
         
         input_bytes = None
         reply = await message.get_reply_message()
@@ -150,14 +151,13 @@ class ImageGenMod(loader.Module):
             except:
                 pass
 
-        # Убрали отображение промпта при загрузке
         msg = await self.inline.form(
             text=self.strings("gen_new"),
             message=message,
             reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]]
         )
         
-        [...](asc_slot://start-slot-21)sid = str(uuid.uuid4())
+        sid = str(uuid.uuid4())
         self.sessions[sid] = {
             "prompt": full_prompt,
             "images": [], 
@@ -165,7 +165,7 @@ class ImageGenMod(loader.Module):
             "input_img": input_bytes
         }
         
-        [...](asc_slot://start-slot-23)await self._process_gen(msg, sid)
+        await self._process_gen(msg, sid)
 
     async def _process_gen(self, target, sid):
         if sid not in self.sessions:
@@ -175,7 +175,7 @@ class ImageGenMod(loader.Module):
         prompt = session["prompt"]
         input_img = session.get("input_img")
 
-        [...](asc_slot://start-slot-25)try:
+        try:
             data = await self._call_api(prompt, input_img)
             
             if not data or "error" in data:
@@ -188,9 +188,8 @@ class ImageGenMod(loader.Module):
                 err_msg = json.dumps(data, indent=2, ensure_ascii=False)
                 raise ValueError(f"No image data found.\n{err_msg}")
 
-            [...](asc_slot://start-slot-27)img_bytes = base64.b64decode(img_b64)
+            img_bytes = base64.b64decode(img_b64)
             
-            # [...](asc_slot://start-slot-29)Сохранение в историю
             hist_id = str(uuid.uuid4())
             history = self.db.get("ImageGen", "history", [])
             history.append({"id": hist_id, "prompt": prompt, "bytes": img_b64})
@@ -204,18 +203,17 @@ class ImageGenMod(loader.Module):
             if not img_url:
                 raise ValueError(f"Upload failed (Provider: Auto)")
             
-            [...](asc_slot://start-slot-31)self.url_cache[hist_id] = img_url
+            self.url_cache[hist_id] = img_url
 
-            [...](asc_slot://start-slot-33)session["images"].append(img_url)
+            session["images"].append(img_url)
             session["index"] = len(session["images"]) - 1
             
-            [...](asc_slot://start-slot-35)await self._update_gen_view(target, sid)
+            await self._update_gen_view(target, sid)
 
-        [...](asc_slot://start-slot-37)except Exception as e:
+        except Exception as e:
             error_text = str(e)
             kb = []
             
-            # Обработка длинной ошибки
             text_to_show = self.strings("error").format(utils.escape_html(error_text))
             
             if len(error_text) > 1000:
@@ -237,7 +235,6 @@ class ImageGenMod(loader.Module):
         file = io.BytesIO(content.encode('utf-8'))
         file.name = "error_log.txt"
         
-        # Отправляем файл через клиент Telethon, так как это надежнее в Hikka
         try:
             await self._client.send_file(
                 call.message.chat.id,
@@ -252,7 +249,7 @@ class ImageGenMod(loader.Module):
         if sid not in self.sessions: return
         s = self.sessions[sid]
         idx = s["index"]
-        total = len(s["images"])\
+        total = len(s["images"])
         img_url = s["images"][idx]
         safe_prompt = utils.escape_html(s["prompt"])
         
@@ -288,7 +285,6 @@ class ImageGenMod(loader.Module):
             return await call.answer("Session expired", show_alert=True)
         await call.answer("Генерация...")
         
-        # Скрываем промпт при регене, показываем только статус
         await call.edit(
             self.strings("gen_var"), 
             reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]]
@@ -297,19 +293,15 @@ class ImageGenMod(loader.Module):
 
     # --- HISTORY ---
 
-    [...](asc_slot://start-slot-39)@loader.command(ru_doc=" - История генераций")
+    @loader.command(ru_doc=" - История генераций")
     async def ighist(self, message: Message):
         """View history"""
         history = self.db.get("ImageGen", "history", [])
         if not history:
             return await utils.answer(message, self.strings("history_empty"))
         
-        # По умолчанию открываем галерею (последнее фото)
-        # Создаем placeholder, который сразу заменится
         msg = await self.inline.form(self.strings("uploading"), message=message, reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
         
-        # [...](asc_slot://start-slot-41)Запускаем рендер последнего слайда
-        # Hikka InlineCall wrapper hack for initial message
         class FakeCall:
             def __init__(self, msg): self.message = msg
             async def edit(self, *args, **kwargs): await self.message.edit(*args, **kwargs)
@@ -318,10 +310,9 @@ class ImageGenMod(loader.Module):
         
         await self._render_history_slide(FakeCall(msg), len(history) - 1)
 
-    [...](asc_slot://start-slot-43)async def _show_history_menu(self, target, is_update=False):
+    async def _show_history_menu(self, target, is_update=False):
         history = self.db.get("ImageGen", "history", [])
         
-        # Если история пуста (например, после очистки)
         if not history:
             if is_update:
                 try:
@@ -334,7 +325,6 @@ class ImageGenMod(loader.Module):
             prompt_preview = (e['prompt'][:25] + '..') if len(e['prompt']) > 25 else e['prompt']
             kb.append([{"text": f"🖼 {utils.escape_html(prompt_preview)}", "callback": self._view_hist_item, "args": (e['id'],)}])
         
-        # Кнопка слайдшоу теперь "Галерея"
         kb.append([{"text": self.strings("btn_slideshow"), "callback": self._start_slideshow}])
         kb.append([{"text": self.strings("btn_clear"), "callback": self._clear_all_cb}])
         kb.append([{"text": self.strings("btn_close"), "callback": self._safe_close}])
@@ -344,16 +334,14 @@ class ImageGenMod(loader.Module):
         if not is_update:
             await self.inline.form(text, message=target, reply_markup=kb)
         else:
-            # Чтобы убрать картинку (если переход из галереи), удаляем и шлем заново
             try:
                 chat_id = target.message.chat.id
                 await target.delete()
                 await self._client.send_message(chat_id, text, reply_markup=self.inline.generate_markup(kb))
             except:
-                # Fallback, если удалить нельзя
                 await target.edit(text, reply_markup=kb)
 
-    [...](asc_slot://start-slot-45)async def _start_slideshow(self, call: InlineCall):
+    async def _start_slideshow(self, call: InlineCall):
         history = self.db.get("ImageGen", "history", [])
         if not history: return await call.answer("Empty")
         await self._render_history_slide(call, len(history) - 1)
@@ -364,14 +352,14 @@ class ImageGenMod(loader.Module):
         if idx == -1: return await call.answer("Not found")
         await self._render_history_slide(call, idx)
 
-    [...](asc_slot://start-slot-47)async def _render_history_slide(self, call: InlineCall, index):
+    async def _render_history_slide(self, call: InlineCall, index):
         history = self.db.get("ImageGen", "history", [])
         if not history: return await self._show_history_menu(call, True)
         
-        [...](asc_slot://start-slot-49)index = max(0, min(index, len(history) - 1))
+        index = max(0, min(index, len(history) - 1))
         item = history[index]
         
-        [...](asc_slot://start-slot-51)img_url = self.url_cache.get(item["id"])
+        img_url = self.url_cache.get(item["id"])
         
         if not img_url:
             await call.edit(self.strings("uploading"), reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
@@ -386,7 +374,7 @@ class ImageGenMod(loader.Module):
         if not img_url:
             return await call.answer("Ошибка загрузки изображения", show_alert=True)
 
-        [...](asc_slot://start-slot-53)safe_prompt = utils.escape_html(item['prompt'])
+        safe_prompt = utils.escape_html(item['prompt'])
         
         nav = []
         if index > 0:
@@ -397,7 +385,6 @@ class ImageGenMod(loader.Module):
 
         kb = [nav]
         
-        # Ряд действий: Удалить один | Еще вариант | Меню (список)
         actions = []
         actions.append({"text": self.strings("btn_del_one"), "callback": self._del_one_cb, "args": (item['id'],)})
         actions.append({"text": self.strings("btn_regen"), "callback": self._regen_from_hist, "args": (item['prompt'],)})
@@ -420,13 +407,11 @@ class ImageGenMod(loader.Module):
 
     async def _del_one_cb(self, call: InlineCall, item_id):
         history = self.db.get("ImageGen", "history", [])
-        # Находим индекс удаляемого элемента
         idx = next((i for i, x in enumerate(history) if x["id"] == item_id), -1)
         
         if idx == -1:
             return await call.answer("Not found", show_alert=True)
             
-        # Удаляем
         history.pop(idx)
         self.db.set("ImageGen", "history", history)
         if item_id in self.url_cache:
@@ -434,10 +419,9 @@ class ImageGenMod(loader.Module):
             
         await call.answer("Удалено!")
         
-        [...](asc_slot://start-slot-55)if not history:
+        if not history:
             await self._show_history_menu(call, is_update=True)
         else:
-            # Показываем следующий (или предыдущий, если удалили последний)
             new_idx = idx if idx < len(history) else idx - 1
             await self._render_history_slide(call, new_idx)
 
@@ -452,7 +436,7 @@ class ImageGenMod(loader.Module):
         await call.answer(self.strings("history_cleared"), show_alert=True)
         await self._show_history_menu(call, is_update=True)
 
-    [...](asc_slot://start-slot-57)async def _dummy_cb(self, call: InlineCall):
+    async def _dummy_cb(self, call: InlineCall):
         await call.answer()
 
     async def _safe_close(self, call: InlineCall):
