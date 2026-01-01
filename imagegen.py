@@ -36,7 +36,7 @@ class ImageGenMod(loader.Module):
         "btn_clear": "🗑 Очистить",
         "btn_close": "❌ Закрыть",
         "btn_loading": "🕘",
-        "btn_slideshow": "🎞 Режим просмотра",
+        "btn_slideshow": "🎞 Отобразить галереей",
     }
 
     def __init__(self):
