@@ -1,7 +1,6 @@
 # meta developer: @h_m_256
-##########
-# 🔑 ключ
-##########
+# requires: Pillow
+# написано с помощью ии ☃️
 import aiohttp
 import base64
 import uuid
@@ -9,6 +8,7 @@ import logging
 import json
 import asyncio
 import io
+from PIL import Image
 from .. import loader, utils
 from telethon.tl.types import Message
 from ..inline.types import InlineCall
@@ -42,7 +42,8 @@ class ImageGenMod(loader.Module):
         "btn_close": "❌ Закрыть",
         "btn_loading": "🕘",
         "btn_slideshow": "🎞 Галерея",
-        "btn_log": "📥 Full Log",
+        "btn_log": "📥 Лог ошибки",
+        "log_caption": "📄 <b>Полный лог ошибки</b>",
     }
 
     def __init__(self):
@@ -67,6 +68,23 @@ class ImageGenMod(loader.Module):
     async def client_ready(self, client, db):
         self._client = client
         self.db = db
+
+    def _resize_image(self, img_bytes):
+        """Resize image to reduce tokens and avoid 429 Resource Exhausted"""
+        try:
+            img = Image.open(io.BytesIO(img_bytes))
+            # Максимальный размер 1024x1024, сохраняем пропорции
+            img.thumbnail((1024, 1024))
+            
+            out = io.BytesIO()
+            # Конвертируем в JPEG для уменьшения веса (PNG слишком тяжелый для токенов)
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+            img.save(out, format='JPEG', quality=85)
+            return out.getvalue()
+        except Exception as e:
+            logger.error(f"Resize failed: {e}")
+            return img_bytes
 
     # --- UPLOADERS ---
 
@@ -93,7 +111,6 @@ class ImageGenMod(loader.Module):
         return None
 
     async def _upload_image(self, img_bytes):
-        # Всегда используем Auto (цепочка)
         async with aiohttp.ClientSession() as session:
             queue = [self._up_catbox, self._up_0x0, self._up_x0]
             for uploader in queue:
@@ -113,7 +130,9 @@ class ImageGenMod(loader.Module):
         parts = [{"text": prompt}]
         
         if input_image_bytes:
-            b64_img = base64.b64encode(input_image_bytes).decode('utf-8')
+            # Сжимаем картинку перед отправкой
+            resized_bytes = await utils.run_sync(self._resize_image, input_image_bytes)
+            b64_img = base64.b64encode(resized_bytes).decode('utf-8')
             parts.insert(0, {"inlineData": {"mimeType": "image/jpeg", "data": b64_img}})
 
         payload = {
@@ -139,7 +158,13 @@ class ImageGenMod(loader.Module):
         if not self.config["api_key"]:
             return await utils.answer(message, self.strings("no_api"))
         
-        full_prompt = (self.config["prefix"] + " " + args).strip()
+        # Разделяем промпт для API и для отображения
+        user_prompt = args.strip()
+        # Если аргументов нет, но есть префикс - используем его как промпт, но в UI пусто
+        if not user_prompt:
+             user_prompt = "..." # Заглушка для UI если только префикс
+
+        api_prompt = (self.config["prefix"] + " " + args).strip()
         
         input_bytes = None
         reply = await message.get_reply_message()
@@ -159,7 +184,8 @@ class ImageGenMod(loader.Module):
         
         sid = str(uuid.uuid4())
         self.sessions[sid] = {
-            "prompt": full_prompt,
+            "api_prompt": api_prompt,
+            "display_prompt": user_prompt,
             "images": [], 
             "index": -1,
             "input_img": input_bytes
@@ -172,11 +198,12 @@ class ImageGenMod(loader.Module):
             return await self._safe_close(target)
             
         session = self.sessions[sid]
-        prompt = session["prompt"]
+        api_prompt = session["api_prompt"]
+        display_prompt = session["display_prompt"]
         input_img = session.get("input_img")
 
         try:
-            data = await self._call_api(prompt, input_img)
+            data = await self._call_api(api_prompt, input_img)
             
             if not data or "error" in data:
                 err_msg = json.dumps(data, indent=2, ensure_ascii=False) if data else "Empty response"
@@ -192,7 +219,8 @@ class ImageGenMod(loader.Module):
             
             hist_id = str(uuid.uuid4())
             history = self.db.get("ImageGen", "history", [])
-            history.append({"id": hist_id, "prompt": prompt, "bytes": img_b64})
+            # Сохраняем в историю display_prompt (без префикса)
+            history.append({"id": hist_id, "prompt": display_prompt, "bytes": img_b64})
             self.db.set("ImageGen", "history", history[-30:])
 
             if hasattr(target, "edit"): 
@@ -235,11 +263,22 @@ class ImageGenMod(loader.Module):
         file = io.BytesIO(content.encode('utf-8'))
         file.name = "error_log.txt"
         
+        chat_id = getattr(call, "chat_id", None)
+        if not chat_id and call.message:
+            chat_id = call.message.chat_id
+        
+        if not chat_id:
+             try:
+                 chat = await call.get_chat()
+                 chat_id = chat.id
+             except:
+                 return await call.answer("Не удалось определить чат", show_alert=True)
+
         try:
             await self._client.send_file(
-                call.message.chat.id,
+                chat_id,
                 file,
-                caption="📄 <b>Full Error Log</b>"
+                caption=self.strings("log_caption")
             )
             await call.answer("Sent!")
         except Exception as e:
@@ -251,7 +290,8 @@ class ImageGenMod(loader.Module):
         idx = s["index"]
         total = len(s["images"])
         img_url = s["images"][idx]
-        safe_prompt = utils.escape_html(s["prompt"])
+        # Показываем промпт без префикса
+        safe_prompt = utils.escape_html(s["display_prompt"])
         
         nav_row = []
         if total > 1:
@@ -310,19 +350,26 @@ class ImageGenMod(loader.Module):
         
         await self._render_history_slide(FakeCall(msg), len(history) - 1)
 
-    async def _show_history_menu(self, target, is_update=False):
+    async def _show_history_menu(self, target, force_new=False):
         history = self.db.get("ImageGen", "history", [])
         
         if not history:
-            if is_update:
-                try:
-                    await target.edit(self.strings("history_empty"), reply_markup=[[{"text": self.strings("btn_close"), "callback": self._safe_close}]])
-                except: pass
+            # Если история пуста, всегда обновляем текущее сообщение или шлем новое
+            text = self.strings("history_empty")
+            kb = [[{"text": self.strings("btn_close"), "callback": self._safe_close}]]
+            try:
+                 if force_new:
+                     await target.delete()
+                     await self._client.send_message(target.message.chat.id, text, reply_markup=self.inline.generate_markup(kb))
+                 else:
+                     await target.edit(text, reply_markup=kb)
+            except: pass
             return
 
         kb = []
         for e in reversed(history[-5:]):
-            prompt_preview = (e['prompt'][:25] + '..') if len(e['prompt']) > 25 else e['prompt']
+            p = e.get('prompt', '...')
+            prompt_preview = (p[:25] + '..') if len(p) > 25 else p
             kb.append([{"text": f"🖼 {utils.escape_html(prompt_preview)}", "callback": self._view_hist_item, "args": (e['id'],)}])
         
         kb.append([{"text": self.strings("btn_slideshow"), "callback": self._start_slideshow}])
@@ -331,15 +378,17 @@ class ImageGenMod(loader.Module):
         
         text = "<b>📝 История генераций:</b>"
 
-        if not is_update:
-            await self.inline.form(text, message=target, reply_markup=kb)
-        else:
+        if force_new:
+            # Удаляем старое (с картинкой) и шлем новое (чистый текст)
             try:
                 chat_id = target.message.chat.id
                 await target.delete()
                 await self._client.send_message(chat_id, text, reply_markup=self.inline.generate_markup(kb))
             except:
+                # Если удалить не вышло, пробуем редактировать
                 await target.edit(text, reply_markup=kb)
+        else:
+            await target.edit(text, reply_markup=kb)
 
     async def _start_slideshow(self, call: InlineCall):
         history = self.db.get("ImageGen", "history", [])
@@ -354,7 +403,7 @@ class ImageGenMod(loader.Module):
 
     async def _render_history_slide(self, call: InlineCall, index):
         history = self.db.get("ImageGen", "history", [])
-        if not history: return await self._show_history_menu(call, True)
+        if not history: return await self._show_history_menu(call, force_new=True)
         
         index = max(0, min(index, len(history) - 1))
         item = history[index]
@@ -374,7 +423,8 @@ class ImageGenMod(loader.Module):
         if not img_url:
             return await call.answer("Ошибка загрузки изображения", show_alert=True)
 
-        safe_prompt = utils.escape_html(item['prompt'])
+        # Берем prompt. Если это старая запись без разделения, берем как есть
+        safe_prompt = utils.escape_html(item.get('prompt', 'image'))
         
         nav = []
         if index > 0:
@@ -387,7 +437,7 @@ class ImageGenMod(loader.Module):
         
         actions = []
         actions.append({"text": self.strings("btn_del_one"), "callback": self._del_one_cb, "args": (item['id'],)})
-        actions.append({"text": self.strings("btn_regen"), "callback": self._regen_from_hist, "args": (item['prompt'],)})
+        actions.append({"text": self.strings("btn_regen"), "callback": self._regen_from_hist, "args": (item.get('prompt', ''),)})
         actions.append({"text": self.strings("btn_list"), "callback": self._back_to_menu})
         
         kb.append(actions)
@@ -403,7 +453,7 @@ class ImageGenMod(loader.Module):
         await self._render_history_slide(call, new_index)
 
     async def _back_to_menu(self, call: InlineCall):
-        await self._show_history_menu(call, is_update=True)
+        await self._show_history_menu(call, force_new=True)
 
     async def _del_one_cb(self, call: InlineCall, item_id):
         history = self.db.get("ImageGen", "history", [])
@@ -420,21 +470,31 @@ class ImageGenMod(loader.Module):
         await call.answer("Удалено!")
         
         if not history:
-            await self._show_history_menu(call, is_update=True)
+            await self._show_history_menu(call, force_new=True)
         else:
             new_idx = idx if idx < len(history) else idx - 1
             await self._render_history_slide(call, new_idx)
 
     async def _regen_from_hist(self, call: InlineCall, prompt):
         sid = str(uuid.uuid4())
-        self.sessions[sid] = {"prompt": prompt, "images": [], "index": -1, "input_img": None}
+        # При регене из истории считаем, что промпт уже "чистый" (без префикса)
+        # Если нужно снова добавить префикс - раскомментируй ниже, но лучше пусть будет как было в истории
+        # api_prompt = (self.config["prefix"] + " " + prompt).strip()
+        
+        self.sessions[sid] = {
+            "api_prompt": prompt, 
+            "display_prompt": prompt, 
+            "images": [], 
+            "index": -1, 
+            "input_img": None
+        }
         await self._regen_cb(call, sid)
 
     async def _clear_all_cb(self, call: InlineCall):
         self.db.set("ImageGen", "history", [])
         self.url_cache.clear()
         await call.answer(self.strings("history_cleared"), show_alert=True)
-        await self._show_history_menu(call, is_update=True)
+        await self._show_history_menu(call, force_new=True)
 
     async def _dummy_cb(self, call: InlineCall):
         await call.answer()
