@@ -49,10 +49,11 @@ class ImageGenMod(loader.Module):
     def __init__(self):
         self.config = loader.ModuleConfig(
             loader.ConfigValue("api_key", "", lambda: self.strings("api_key"), validator=loader.validators.Hidden()),
-            # Дефолт на 2.5 Flash, убрали 2.0
-            loader.ConfigValue("model", "gemini-2.5-flash-image-preview", lambda: self.strings("model"), validator=loader.validators.Choice([
+            # Обновили дефолтную модель
+            loader.ConfigValue("model", "gemini-2.5-flash-image", lambda: self.strings("model"), validator=loader.validators.Choice([
+                "gemini-2.5-flash-image",
                 "gemini-2.5-flash-image-preview",
-                "gemini-3-pro-image-preview",
+                "gemini-2.0-flash-exp",
                 "nano-banana-pro-preview",
                 "imagen-4.0-generate-001",
                 "imagen-4.0-ultra-generate-001",
@@ -72,7 +73,6 @@ class ImageGenMod(loader.Module):
         """Resize image to reduce tokens and avoid 429 Resource Exhausted"""
         try:
             img = Image.open(io.BytesIO(img_bytes))
-            # 800px - оптимально для квоты и качества
             img.thumbnail((800, 800))
             
             out = io.BytesIO()
@@ -281,9 +281,30 @@ class ImageGenMod(loader.Module):
         file = io.BytesIO(content.encode('utf-8'))
         file.name = "error_log.txt"
         
+        # Исправленный метод отправки: не зависим от call.message.reply
         try:
-            # Используем reply на сообщение с ошибкой - самый надежный метод
-            await call.message.reply(file=file, text=self.strings("log_caption"))
+            # Получаем ID чата безопасно
+            chat_id = getattr(call, "chat_id", None)
+            # Если нет в атрибуте, пробуем через peer или message (если он есть)
+            if not chat_id:
+                if call.message:
+                    chat_id = call.message.chat_id
+                elif hasattr(call, "peer"):
+                    chat_id = call.peer
+            
+            if not chat_id:
+                # Крайний случай - пробуем запросить объект чата
+                try:
+                    c = await call.get_chat()
+                    chat_id = c.id
+                except:
+                    return await call.answer("Не удалось определить ID чата", show_alert=True)
+            
+            await self._client.send_file(
+                chat_id,
+                file,
+                caption=self.strings("log_caption")
+            )
             await call.answer("Sent!")
         except Exception as e:
             await call.answer(f"Failed to send: {e}", show_alert=True)
@@ -356,37 +377,40 @@ class ImageGenMod(loader.Module):
     async def _show_history_menu(self, target, force_new=False):
         history = self.db.get("ImageGen", "history", [])
         
-        if not history:
-            text = self.strings("history_empty")
-            kb = [[{"text": self.strings("btn_close"), "callback": self._safe_close}]]
-            try:
-                 if force_new:
-                     await target.delete()
-                     await self._client.send_message(target.message.chat.id, text, reply_markup=self.inline.generate_markup(kb))
-                 else:
-                     await target.edit(text, reply_markup=kb)
-            except: pass
-            return
-
+        text = self.strings("history_empty") if not history else "<b>📝 История генераций:</b>"
+        
         kb = []
-        for e in reversed(history[-5:]):
-            p = e.get('prompt', '...')
-            prompt_preview = (p[:25] + '..') if len(p) > 25 else p
-            kb.append([{"text": f"🖼 {utils.escape_html(prompt_preview)}", "callback": self._view_hist_item, "args": (e['id'],)}])
+        if history:
+            for e in reversed(history[-5:]):
+                p = e.get('prompt', '...')
+                prompt_preview = (p[:25] + '..') if len(p) > 25 else p
+                kb.append([{"text": f"🖼 {utils.escape_html(prompt_preview)}", "callback": self._view_hist_item, "args": (e['id'],)}])
+            
+            kb.append([{"text": self.strings("btn_slideshow"), "callback": self._start_slideshow}])
+            kb.append([{"text": self.strings("btn_clear"), "callback": self._clear_all_cb}])
         
-        kb.append([{"text": self.strings("btn_slideshow"), "callback": self._start_slideshow}])
-        kb.append([{"text": self.strings("btn_clear"), "callback": self._clear_all_cb}])
         kb.append([{"text": self.strings("btn_close"), "callback": self._safe_close}])
-        
-        text = "<b>📝 История генераций:</b>"
 
+        # Логика чистого перехода
         if force_new:
             try:
-                chat_id = target.message.chat.id
+                # Пытаемся удалить старое (с картинкой)
                 await target.delete()
+                # И отправить новое (текст)
+                chat_id = target.chat_id if hasattr(target, "chat_id") else target.message.chat_id
                 await self._client.send_message(chat_id, text, reply_markup=self.inline.generate_markup(kb))
             except:
-                await target.edit(text, reply_markup=kb)
+                # Если удалить нельзя (редкий случай), редактируем и ЯВНО УБИРАЕМ КАРТИНКУ (file=None)
+                try:
+                    # Для чистого Telethon объекта
+                    if hasattr(target, "message") and hasattr(target.message, "edit"):
+                        await target.message.edit(text, reply_markup=self.inline.generate_markup(kb), file=None)
+                    else:
+                        # Fallback для враппера
+                        await target.edit(text, reply_markup=kb, file=None)
+                except:
+                    # Если уж совсем всё плохо
+                    await target.edit(text, reply_markup=kb)
         else:
             await target.edit(text, reply_markup=kb)
 
