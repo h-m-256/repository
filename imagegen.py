@@ -135,10 +135,27 @@ class ImageGenMod(loader.Module):
             b64_img = base64.b64encode(resized_bytes).decode('utf-8')
             parts.insert(0, {"inlineData": {"mimeType": "image/jpeg", "data": b64_img}})
 
+        # Настройки безопасности: разрешаем всё (BLOCK_NONE)
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"}
+        ]
+
         payload = {
             "contents": [{"parts": parts}],
+            "safetySettings": safety_settings,
             "generationConfig": {"candidateCount": 1, "temperature": 1.0}
         }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=90) as resp:
+                try:
+                    return await resp.json()
+                except:
+                    return {"error": {"message": f"HTTP {resp.status}"}}
         
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, timeout=90) as resp:
