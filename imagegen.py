@@ -23,6 +23,7 @@ class ImageGenMod(loader.Module):
         "name": "ImageGen",
         "api_key": "Google AI Studio API key",
         "model": "Model to use",
+        "quality": "Image upload quality (Input)",
         "prefix": "Initial prompt prefix (style, quality, etc)",
         "gen_new": "🎨 <b>Генерация...</b>\n<i>{}</i>",
         "gen_var": "🎨 <b>Генерация нового варианта...</b>\n<i>{}</i>",
@@ -30,9 +31,11 @@ class ImageGenMod(loader.Module):
         "error": "❌ <b>Ошибка:</b>\n<blockquote expandable>{}</blockquote>",
         "error_long": "❌ <b>Ошибка слишком длинная!</b>\nСкачайте лог ниже.",
         "success": "✅ <b>Готово!</b>\n<i>{}</i>",
+        "success_with_text": "✅ <b>Готово!</b>\n<i>{}</i>\n\n<blockquote expandable>{}</blockquote>",
         "history_empty": "❌ История пуста!",
         "history_cleared": "✅ История очищена!",
         "history_item": "🖼 <b>История [{}/{}]</b>\n<i>{}</i>",
+        "history_item_text": "🖼 <b>История [{}/{}]</b>\n<i>{}</i>\n\n<blockquote expandable>{}</blockquote>",
         "no_api": "❌ <b>Не установлен API ключ!</b>",
         "btn_regen": "🔄 Еще вариант",
         "btn_back": "🔙 Меню",
@@ -53,12 +56,13 @@ class ImageGenMod(loader.Module):
             loader.ConfigValue("model", "gemini-2.5-flash-image", lambda: self.strings("model"), validator=loader.validators.Choice([
                 "gemini-2.5-flash-image",
                 "gemini-2.5-flash-image-preview",
-                "gemini-2.0-flash-exp",
+                "gemini-3-pro-image-preview",
                 "nano-banana-pro-preview",
                 "imagen-4.0-generate-001",
                 "imagen-4.0-ultra-generate-001",
                 "imagen-4.0-fast-generate-001"
             ])),
+            loader.ConfigValue("quality", "Low", lambda: self.strings("quality"), validator=loader.validators.Choice(["Low", "Medium", "High", "Original"])),
             loader.ConfigValue("prefix", "", lambda: self.strings("prefix")),
         )
         self.sessions = {}
@@ -70,12 +74,24 @@ class ImageGenMod(loader.Module):
         self.db = db
 
     def _resize_image(self, img_bytes):
+        setting = self.config["quality"]
+        if setting == "Original":
+            return img_bytes
+        
+        # Настройки ресайза: (Max Size, JPEG Quality)
+        presets = {
+            "Low": (800, 75),
+            "Medium": (1024, 85),
+            "High": (1280, 90)
+        }
+        size, qual = presets.get(setting, (800, 75))
+
         try:
             img = Image.open(io.BytesIO(img_bytes))
-            img.thumbnail((800, 800))
+            img.thumbnail((size, size))
             out = io.BytesIO()
             if img.mode in ("RGBA", "P"): img = img.convert("RGB")
-            img.save(out, format='JPEG', quality=75)
+            img.save(out, format='JPEG', quality=qual)
             return out.getvalue()
         except Exception as e:
             logger.error(f"Resize failed: {e}")
@@ -190,15 +206,33 @@ class ImageGenMod(loader.Module):
                 err_msg = json.dumps(data, indent=2, ensure_ascii=False) if data else "Empty response"
                 raise ValueError(err_msg)
 
-            try: img_b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-            except: 
-                err_msg = json.dumps(data, indent=2, ensure_ascii=False)
-                raise ValueError(f"No image data found.\n{err_msg}")
+            # --- МУЛЬТИМОДАЛЬНЫЙ ПАРСИНГ ---
+            img_b64 = None
+            text_resp = ""
+            
+            try:
+                # Берем части первого кандидата
+                parts = data["candidates"][0]["content"]["parts"]
+                for part in parts:
+                    if "inlineData" in part:
+                        img_b64 = part["inlineData"]["data"]
+                    if "text" in part:
+                        text_resp += part["text"]
+            except (KeyError, IndexError, TypeError):
+                 err_msg = json.dumps(data, indent=2, ensure_ascii=False)
+                 raise ValueError(f"Invalid response structure.\n{err_msg}")
+
+            if not img_b64:
+                 # Если картинки нет, но есть текст - кидаем ошибку с текстом
+                 if text_resp: raise ValueError(f"No image, only text:\n{text_resp}")
+                 else: raise ValueError("No image data found.")
+            # -------------------------------
 
             img_bytes = base64.b64decode(img_b64)
             hist_id = str(uuid.uuid4())
             history = self.db.get("ImageGen", "history", [])
-            history.append({"id": hist_id, "prompt": session["display_prompt"], "bytes": img_b64})
+            # Сохраняем в историю и промпт, и текстовый ответ модели
+            history.append({"id": hist_id, "prompt": session["display_prompt"], "bytes": img_b64, "text_resp": text_resp})
             self.db.set("ImageGen", "history", history[-30:])
 
             if hasattr(target, "edit"):
@@ -208,7 +242,7 @@ class ImageGenMod(loader.Module):
             if not img_url: raise ValueError("Upload failed")
             
             self.url_cache[hist_id] = img_url
-            session["images"].append(img_url)
+            session["images"].append({"url": img_url, "text": text_resp})
             session["index"] = len(session["images"]) - 1
             
             await self._update_gen_view(target, sid)
@@ -247,8 +281,18 @@ class ImageGenMod(loader.Module):
         s = self.sessions[sid]
         idx = s["index"]
         total = len(s["images"])
-        img_url = s["images"][idx]
+        
+        current_data = s["images"][idx]
+        img_url = current_data["url"]
+        ai_text = current_data.get("text", "")
+        
         safe_prompt = utils.escape_html(s["display_prompt"])
+        
+        # Формируем подпись
+        if ai_text:
+             text_to_show = self.strings("success_with_text").format(safe_prompt, utils.escape_html(ai_text.strip()))
+        else:
+             text_to_show = self.strings("success").format(safe_prompt)
         
         nav_row = []
         if total > 1:
@@ -266,7 +310,7 @@ class ImageGenMod(loader.Module):
         kb.append([{"text": self.strings("btn_close"), "callback": self._safe_close}])
 
         await target.edit(
-            text=self.strings("success").format(safe_prompt),
+            text=text_to_show,
             photo=img_url,
             reply_markup=kb
         )
@@ -285,7 +329,6 @@ class ImageGenMod(loader.Module):
         s = self.sessions[sid]
         await call.answer("Генерация...")
         
-        # Показываем статус с промптом
         await call.edit(
             self.strings("gen_var").format(utils.escape_html(s["display_prompt"])), 
             reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]]
@@ -323,7 +366,6 @@ class ImageGenMod(loader.Module):
             kb.append([{"text": self.strings("btn_clear"), "callback": self._clear_all_cb}])
         kb.append([{"text": self.strings("btn_close"), "callback": self._safe_close}])
 
-        # Просто редактируем. Да, с картинкой, но зато работает.
         await target.edit(text, reply_markup=kb)
 
     async def _start_slideshow(self, call: InlineCall):
@@ -356,6 +398,13 @@ class ImageGenMod(loader.Module):
         if not img_url: return await call.answer("Ошибка загрузки", show_alert=True)
 
         safe_prompt = utils.escape_html(item.get('prompt', 'image'))
+        ai_text = item.get("text_resp", "")
+
+        if ai_text:
+            text_to_show = self.strings("history_item_text").format(index + 1, len(history), safe_prompt, utils.escape_html(ai_text.strip()))
+        else:
+            text_to_show = self.strings("history_item").format(index + 1, len(history), safe_prompt)
+
         nav = []
         if index > 0:
             nav.append({"text": "⬅️", "callback": self._hist_nav, "args": (index - 1,)})
@@ -372,7 +421,7 @@ class ImageGenMod(loader.Module):
         kb.append([{"text": self.strings("btn_close"), "callback": self._safe_close}])
         
         await call.edit(
-            text=self.strings("history_item").format(index + 1, len(history), safe_prompt),
+            text=text_to_show,
             photo=img_url,
             reply_markup=kb
         )
@@ -407,6 +456,7 @@ class ImageGenMod(loader.Module):
         self.db.set("ImageGen", "history", [])
         self.url_cache.clear()
         await call.answer(self.strings("history_cleared"), show_alert=True)
+        # Просто перерисовываем меню, оно само увидит что история пуста и покажет соответствующий текст
         await self._show_history_menu(call)
 
     async def _dummy_cb(self, call: InlineCall): await call.answer()
