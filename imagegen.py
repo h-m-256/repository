@@ -48,6 +48,8 @@ class ImageGenMod(loader.Module):
         "btn_log": "📥 Лог в Избранное",
         "log_caption": "📄 <b>Полный лог ошибки ImageGen</b>",
         "btn_back_hist": "🔙 В историю",
+        "btn_model": "⚙️ Модель",
+        "select_model": "⚙️ <b>Выберите модель для следующей генерации:</b>",
     }
 
     def __init__(self):
@@ -78,7 +80,6 @@ class ImageGenMod(loader.Module):
         if setting == "Original":
             return img_bytes
         
-        # Настройки ресайза: (Max Size, JPEG Quality)
         presets = {
             "Low": (800, 75),
             "Medium": (1024, 85),
@@ -131,8 +132,8 @@ class ImageGenMod(loader.Module):
             return None
 
     # --- API ---
-    async def _call_api(self, prompt: str, input_image_bytes=None):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.config['model']}:generateContent?key={self.config['api_key']}"
+    async def _call_api(self, model_name: str, prompt: str, input_image_bytes=None):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.config['api_key']}"
         parts = [{"text": prompt}]
         
         if input_image_bytes:
@@ -193,7 +194,16 @@ class ImageGenMod(loader.Module):
         )
         
         sid = str(uuid.uuid4())
-        self.sessions[sid] = {"api_prompt": api_prompt, "display_prompt": user_prompt, "images": [], "index": -1, "input_img": input_bytes, "from_history": False}
+        # Сохраняем модель в сессию
+        self.sessions[sid] = {
+            "api_prompt": api_prompt, 
+            "display_prompt": user_prompt, 
+            "images": [], 
+            "index": -1, 
+            "input_img": input_bytes, 
+            "from_history": False,
+            "model": self.config["model"] # Начальная модель из конфига
+        }
         await self._process_gen(msg, sid)
 
     async def _process_gen(self, target, sid):
@@ -201,37 +211,31 @@ class ImageGenMod(loader.Module):
         session = self.sessions[sid]
         
         try:
-            data = await self._call_api(session["api_prompt"], session.get("input_img"))
+            # Передаем модель из сессии
+            data = await self._call_api(session["model"], session["api_prompt"], session.get("input_img"))
             if not data or "error" in data:
                 err_msg = json.dumps(data, indent=2, ensure_ascii=False) if data else "Empty response"
                 raise ValueError(err_msg)
 
-            # --- МУЛЬТИМОДАЛЬНЫЙ ПАРСИНГ ---
             img_b64 = None
             text_resp = ""
             
             try:
-                # Берем части первого кандидата
                 parts = data["candidates"][0]["content"]["parts"]
                 for part in parts:
-                    if "inlineData" in part:
-                        img_b64 = part["inlineData"]["data"]
-                    if "text" in part:
-                        text_resp += part["text"]
+                    if "inlineData" in part: img_b64 = part["inlineData"]["data"]
+                    if "text" in part: text_resp += part["text"]
             except (KeyError, IndexError, TypeError):
                  err_msg = json.dumps(data, indent=2, ensure_ascii=False)
                  raise ValueError(f"Invalid response structure.\n{err_msg}")
 
             if not img_b64:
-                 # Если картинки нет, но есть текст - кидаем ошибку с текстом
                  if text_resp: raise ValueError(f"No image, only text:\n{text_resp}")
                  else: raise ValueError("No image data found.")
-            # -------------------------------
 
             img_bytes = base64.b64decode(img_b64)
             hist_id = str(uuid.uuid4())
             history = self.db.get("ImageGen", "history", [])
-            # Сохраняем в историю и промпт, и текстовый ответ модели
             history.append({"id": hist_id, "prompt": session["display_prompt"], "bytes": img_b64, "text_resp": text_resp})
             self.db.set("ImageGen", "history", history[-30:])
 
@@ -285,10 +289,8 @@ class ImageGenMod(loader.Module):
         current_data = s["images"][idx]
         img_url = current_data["url"]
         ai_text = current_data.get("text", "")
-        
         safe_prompt = utils.escape_html(s["display_prompt"])
         
-        # Формируем подпись
         if ai_text:
              text_to_show = self.strings("success_with_text").format(safe_prompt, utils.escape_html(ai_text.strip()))
         else:
@@ -302,7 +304,12 @@ class ImageGenMod(loader.Module):
 
         kb = []
         if nav_row: kb.append(nav_row)
-        kb.append([{"text": self.strings("btn_regen"), "callback": self._regen_cb, "args": (sid,)}])
+        
+        # Кнопки управления
+        ctrl_row = []
+        ctrl_row.append({"text": self.strings("btn_regen"), "callback": self._regen_cb, "args": (sid,)})
+        ctrl_row.append({"text": self.strings("btn_model"), "callback": self._model_menu, "args": (sid,)}) # Кнопка смены модели
+        kb.append(ctrl_row)
         
         if s.get("from_history"):
             kb.append([{"text": self.strings("btn_back_hist"), "callback": self._back_to_menu}])
@@ -314,6 +321,34 @@ class ImageGenMod(loader.Module):
             photo=img_url,
             reply_markup=kb
         )
+
+    # --- MODEL SWITCHER ---
+    async def _model_menu(self, call: InlineCall, sid):
+        if sid not in self.sessions: return await call.answer("Expired", show_alert=True)
+        
+        kb = [
+            [{"text": "🍌 Nano Banana Pro", "callback": self._set_model_cb, "args": (sid, "gemini-3-pro-image-preview")}],
+            [{"text": "⚡️ Flash 2.5", "callback": self._set_model_cb, "args": (sid, "gemini-2.5-flash-image")}],
+            [{"text": "🖼 Imagen 4", "callback": self._set_model_cb, "args": (sid, "imagen-4.0-generate-001")}],
+            [{"text": "🔙 Назад", "callback": self._back_to_gen, "args": (sid,)}]
+        ]
+        
+        await call.edit(
+            text=self.strings("select_model"),
+            reply_markup=kb
+        )
+
+    async def _set_model_cb(self, call: InlineCall, sid, model_name):
+        if sid not in self.sessions: return await call.answer("Expired", show_alert=True)
+        self.sessions[sid]["model"] = model_name
+        # Сразу запускаем реген с новой моделью
+        await self._regen_cb(call, sid)
+
+    async def _back_to_gen(self, call: InlineCall, sid):
+        if sid not in self.sessions: return await call.answer("Expired")
+        await self._update_gen_view(call, sid)
+
+    # ----------------------
 
     async def _nav_gen_cb(self, call: InlineCall, sid, direction):
         if sid not in self.sessions: return await call.answer("Expired")
@@ -327,7 +362,7 @@ class ImageGenMod(loader.Module):
     async def _regen_cb(self, call: InlineCall, sid):
         if sid not in self.sessions: return await call.answer("Expired", show_alert=True)
         s = self.sessions[sid]
-        await call.answer("Генерация...")
+        await call.answer(f"Генерация ({s['model']})...")
         
         await call.edit(
             self.strings("gen_var").format(utils.escape_html(s["display_prompt"])), 
@@ -356,6 +391,9 @@ class ImageGenMod(loader.Module):
         history = self.db.get("ImageGen", "history", [])
         text = self.strings("history_empty") if not history else "<b>📝 История генераций:</b>"
         
+        # Статичная картинка из списка
+        list_img = "https://raw.githubusercontent.com/h-m-256/repository/refs/heads/main/media/list_mode.png"
+        
         kb = []
         if history:
             for e in reversed(history[-5:]):
@@ -366,7 +404,7 @@ class ImageGenMod(loader.Module):
             kb.append([{"text": self.strings("btn_clear"), "callback": self._clear_all_cb}])
         kb.append([{"text": self.strings("btn_close"), "callback": self._safe_close}])
 
-        await target.edit(text, reply_markup=kb)
+        await target.edit(text, reply_markup=kb, photo=list_img)
 
     async def _start_slideshow(self, call: InlineCall):
         history = self.db.get("ImageGen", "history", [])
@@ -449,14 +487,14 @@ class ImageGenMod(loader.Module):
 
     async def _regen_from_hist(self, call: InlineCall, prompt):
         sid = str(uuid.uuid4())
-        self.sessions[sid] = {"api_prompt": prompt, "display_prompt": prompt, "images": [], "index": -1, "input_img": None, "from_history": True}
+        # При регене из истории берем модель из конфига (дефолтную)
+        self.sessions[sid] = {"api_prompt": prompt, "display_prompt": prompt, "images": [], "index": -1, "input_img": None, "from_history": True, "model": self.config["model"]}
         await self._regen_cb(call, sid)
 
     async def _clear_all_cb(self, call: InlineCall):
         self.db.set("ImageGen", "history", [])
         self.url_cache.clear()
         await call.answer(self.strings("history_cleared"), show_alert=True)
-        # Просто перерисовываем меню, оно само увидит что история пуста и покажет соответствующий текст
         await self._show_history_menu(call)
 
     async def _dummy_cb(self, call: InlineCall): await call.answer()
