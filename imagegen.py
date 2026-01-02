@@ -24,8 +24,8 @@ class ImageGenMod(loader.Module):
         "api_key": "Google AI Studio API key",
         "model": "Model to use",
         "prefix": "Initial prompt prefix (style, quality, etc)",
-        "gen_new": "🎨 <b>Генерация...</b>",
-        "gen_var": "🎨 <b>Генерация нового варианта...</b>",
+        "gen_new": "🎨 <b>Генерация...</b>\n<i>{}</i>",
+        "gen_var": "🎨 <b>Генерация нового варианта...</b>\n<i>{}</i>",
         "uploading": "📤 <b>Обработка и загрузка...</b>",
         "error": "❌ <b>Ошибка:</b>\n<blockquote expandable>{}</blockquote>",
         "error_long": "❌ <b>Ошибка слишком длинная!</b>\nСкачайте лог ниже.",
@@ -53,7 +53,7 @@ class ImageGenMod(loader.Module):
             loader.ConfigValue("model", "gemini-2.5-flash-image", lambda: self.strings("model"), validator=loader.validators.Choice([
                 "gemini-2.5-flash-image",
                 "gemini-2.5-flash-image-preview",
-                "gemini-3-pro-image-preview",
+                "gemini-2.0-flash-exp",
                 "nano-banana-pro-preview",
                 "imagen-4.0-generate-001",
                 "imagen-4.0-ultra-generate-001",
@@ -171,7 +171,7 @@ class ImageGenMod(loader.Module):
             except: pass
 
         msg = await self.inline.form(
-            text=self.strings("gen_new"),
+            text=self.strings("gen_new").format(utils.escape_html(user_prompt)),
             message=message,
             reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]]
         )
@@ -225,7 +225,6 @@ class ImageGenMod(loader.Module):
                 kb.append([{"text": self.strings("btn_log"), "callback": self._dl_error, "args": (err_id,)}])
 
             kb.append([{"text": self.strings("btn_regen"), "callback": self._regen_cb, "args": (sid,)}])
-            # Если пришли из истории, то и кнопка закрытия должна вести в историю? Нет, лучше отдельно
             if session.get("from_history"):
                 kb.append([{"text": self.strings("btn_back_hist"), "callback": self._back_to_menu}])
             else:
@@ -261,7 +260,6 @@ class ImageGenMod(loader.Module):
         if nav_row: kb.append(nav_row)
         kb.append([{"text": self.strings("btn_regen"), "callback": self._regen_cb, "args": (sid,)}])
         
-        # Кнопка возврата в историю, если генерация была запущена оттуда
         if s.get("from_history"):
             kb.append([{"text": self.strings("btn_back_hist"), "callback": self._back_to_menu}])
         
@@ -284,8 +282,14 @@ class ImageGenMod(loader.Module):
 
     async def _regen_cb(self, call: InlineCall, sid):
         if sid not in self.sessions: return await call.answer("Expired", show_alert=True)
+        s = self.sessions[sid]
         await call.answer("Генерация...")
-        await call.edit(self.strings("gen_var"), reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
+        
+        # Показываем статус с промптом
+        await call.edit(
+            self.strings("gen_var").format(utils.escape_html(s["display_prompt"])), 
+            reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]]
+        )
         await self._process_gen(call, sid)
 
     # --- HISTORY ---
@@ -297,23 +301,20 @@ class ImageGenMod(loader.Module):
         
         msg = await self.inline.form(self.strings("uploading"), message=message, reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
         
-        # Fake wrapper для первого запуска
         class FakeCall:
             def __init__(self, msg): self.message = msg
             async def edit(self, *args, **kwargs): await self.message.edit(*args, **kwargs)
             async def answer(self, *args, **kwargs): pass
             async def delete(self): await self.message.delete()
         
-        # Открываем с 0 (первого/старого элемента)
         await self._render_history_slide(FakeCall(msg), 0)
 
-    async def _show_history_menu(self, target, force_new=False):
+    async def _show_history_menu(self, target):
         history = self.db.get("ImageGen", "history", [])
         text = self.strings("history_empty") if not history else "<b>📝 История генераций:</b>"
         
         kb = []
         if history:
-            # Меню: последние 5 (снизу списка)
             for e in reversed(history[-5:]):
                 p = e.get('prompt', '...')
                 prompt_preview = (p[:25] + '..') if len(p) > 25 else p
@@ -322,33 +323,12 @@ class ImageGenMod(loader.Module):
             kb.append([{"text": self.strings("btn_clear"), "callback": self._clear_all_cb}])
         kb.append([{"text": self.strings("btn_close"), "callback": self._safe_close}])
 
-        if force_new:
-            try:
-                # Надежно получаем ID чата ДО удаления
-                chat_id = None
-                if hasattr(target, "message") and target.message: chat_id = target.message.chat_id
-                elif hasattr(target, "chat_id") and target.chat_id: chat_id = target.chat_id
-                
-                # Пытаемся удалить
-                try: await target.delete()
-                except: pass # Если не удалилось, попробуем отправить новое или эдит
-                
-                if chat_id:
-                    await self._client.send_message(chat_id, text, reply_markup=self.inline.generate_markup(kb))
-                else:
-                    # Fallback edit
-                     await target.edit(text, reply_markup=kb, file=None)
-            except Exception as e:
-                logger.error(f"Force new menu failed: {e}")
-                # Аварийный вариант
-                await target.edit(text, reply_markup=kb, file=None)
-        else:
-            await target.edit(text, reply_markup=kb)
+        # Просто редактируем. Да, с картинкой, но зато работает.
+        await target.edit(text, reply_markup=kb)
 
     async def _start_slideshow(self, call: InlineCall):
         history = self.db.get("ImageGen", "history", [])
         if not history: return await call.answer("Empty")
-        # Старт слайдшоу с 0 (первого/старого элемента)
         await self._render_history_slide(call, 0)
 
     async def _view_hist_item(self, call: InlineCall, item_id):
@@ -359,7 +339,7 @@ class ImageGenMod(loader.Module):
 
     async def _render_history_slide(self, call: InlineCall, index):
         history = self.db.get("ImageGen", "history", [])
-        if not history: return await self._show_history_menu(call, force_new=True)
+        if not history: return await self._show_history_menu(call)
         
         index = max(0, min(index, len(history) - 1))
         item = history[index]
@@ -401,7 +381,7 @@ class ImageGenMod(loader.Module):
         await self._render_history_slide(call, new_index)
 
     async def _back_to_menu(self, call: InlineCall):
-        await self._show_history_menu(call, force_new=True)
+        await self._show_history_menu(call)
 
     async def _del_one_cb(self, call: InlineCall, item_id):
         history = self.db.get("ImageGen", "history", [])
@@ -413,14 +393,13 @@ class ImageGenMod(loader.Module):
         if item_id in self.url_cache: del self.url_cache[item_id]
         
         await call.answer("Удалено!")
-        if not history: await self._show_history_menu(call, force_new=True)
+        if not history: await self._show_history_menu(call)
         else:
             new_idx = idx if idx < len(history) else idx - 1
             await self._render_history_slide(call, new_idx)
 
     async def _regen_from_hist(self, call: InlineCall, prompt):
         sid = str(uuid.uuid4())
-        # Маркируем сессию как "из истории"
         self.sessions[sid] = {"api_prompt": prompt, "display_prompt": prompt, "images": [], "index": -1, "input_img": None, "from_history": True}
         await self._regen_cb(call, sid)
 
@@ -428,7 +407,7 @@ class ImageGenMod(loader.Module):
         self.db.set("ImageGen", "history", [])
         self.url_cache.clear()
         await call.answer(self.strings("history_cleared"), show_alert=True)
-        await self._show_history_menu(call, force_new=True)
+        await self._show_history_menu(call)
 
     async def _dummy_cb(self, call: InlineCall): await call.answer()
     async def _safe_close(self, call: InlineCall):
