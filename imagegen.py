@@ -53,7 +53,7 @@ class ImageGenMod(loader.Module):
             loader.ConfigValue("model", "gemini-2.5-flash-image", lambda: self.strings("model"), validator=loader.validators.Choice([
                 "gemini-2.5-flash-image",
                 "gemini-2.5-flash-image-preview",
-                "gemini-2.0-flash-exp",
+                "gemini-3-pro-image-preview",
                 "nano-banana-pro-preview",
                 "imagen-4.0-generate-001",
                 "imagen-4.0-ultra-generate-001",
