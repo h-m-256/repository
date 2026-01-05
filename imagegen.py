@@ -1,5 +1,6 @@
 # meta developer: @h_m_256
 # написано с помощью ии ☃️
+# ебать конечно тут вайбкода, но ладно
 import aiohttp
 import base64
 import uuid
@@ -21,23 +22,33 @@ class ImageGenMod(loader.Module):
 
     strings = {
         "name": "ImageGen",
-        "api_key": "Google AI Studio API key (for .ig)",
-        "model_google": "Google Model (Default)",
-        "model_pollinations": "Pollinations Model (for .ip)",
-        "quality": "Image upload quality (Input for .ig)",
-        "prefix": "Initial prompt prefix (style, etc)",
+        "api_key": "API ключ Google AI Studio (для .ig)",
+        "model_google": "Модель Google по умолчанию",
+        "model_pollinations": "Модель Pollinations (для .igp)",
+        "quality": "Качество загружаемых фото (для .ig)",
+        "prefix": "Префикс промпта (стиль и т.д.)",
+        
+        # Генерация (Text-to-Image)
         "gen_new": "🎨 <b>Генерация...</b>\n<i>{}</i>\n🔮 <b>Модель:</b> {}",
         "gen_var": "🎨 <b>Генерация нового варианта...</b>\n<i>{}</i>\n🔮 <b>Модель:</b> {}",
+        "success": "✅ <b>Готово!</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>",
+        "success_with_text": "✅ <b>Готово!</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>\n\n📜 <b>Ответ ИИ (Стр. {}/{}):</b>\n<blockquote expandable>{}</blockquote>",
+        
+        # Редактирование (Image-to-Image)
+        "edit_new": "🎨 <b>Редактирование...</b>\n<i>{}</i>\n🔮 <b>Модель:</b> {}",
+        "edit_var": "🎨 <b>Редактирование (вариант)...</b>\n<i>{}</i>\n🔮 <b>Модель:</b> {}",
+        "edit_success": "🖼 <b>Изображение отредактировано!</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>",
+        "edit_success_text": "🖼 <b>Изображение отредактировано!</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>\n\n📜 <b>Ответ ИИ (Стр. {}/{}):</b>\n<blockquote expandable>{}</blockquote>",
+
+        "only_text_response": "⚠️ <b>Изображение не сгенерировано (только текст):</b>\n🔮 <b>Модель:</b> {}\n\n📜 <b>Ответ ИИ (Стр. {}/{}):</b>\n<blockquote expandable>{}</blockquote>",
+
         "uploading": "📤 <b>Обработка и загрузка...</b>",
         "error": "❌ <b>Ошибка:</b>\n<blockquote expandable>{}</blockquote>",
-        "error_long": "❌ <b>Ошибка слишком длинная!</b>\nСкачайте лог ниже.",
-        "success": "✅ <b>Готово!</b>\n<i>{}</i>",
-        "success_with_text": "✅ <b>Готово!</b>\n<i>{}</i>\n\n<blockquote expandable>{}</blockquote>",
         "history_empty": "❌ История пуста!",
         "history_cleared": "✅ История очищена!",
         "history_cleared_n": "✅ Удалено последних записей: {}",
-        "history_item": "🖼 <b>История [{}/{}]</b>\n<i>{}</i>",
-        "history_item_text": "🖼 <b>История [{}/{}]</b>\n<i>{}</i>\n\n<blockquote expandable>{}</blockquote>",
+        "history_item": "🖼 <b>История [{}/{}]</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>",
+        
         "no_api": "❌ <b>Не установлен API ключ для Google!</b>",
         "btn_regen": "🔄 Еще вариант",
         "btn_back": "🔙 Меню",
@@ -52,6 +63,8 @@ class ImageGenMod(loader.Module):
         "btn_back_hist": "🔙 В историю",
         "btn_model": "⚙️ Модель",
         "select_model": "⚙️ <b>Выберите модель для перегенерации:</b>",
+        "model_hidden_warn": "\n\n⚠️ <i>Модели Pollinations скрыты, так как они не поддерживают редактирование изображений.</i>",
+        "arg_err": "❌ Аргумент должен быть числом > 0",
     }
 
     def __init__(self):
@@ -107,7 +120,6 @@ class ImageGenMod(loader.Module):
             if resp.status == 200:
                 res = await resp.json()
                 url = res['data']['url']
-                # Tmpfiles возвращает ссылку на вьювер, для прямой нужно добавить /dl/
                 return url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
         return None
 
@@ -128,7 +140,6 @@ class ImageGenMod(loader.Module):
 
     async def _upload_image(self, img_bytes):
         async with aiohttp.ClientSession() as session:
-            # Приоритет: x0 > tmpfiles > catbox > 0x0
             queue = [self._up_x0, self._up_tmpfiles, self._up_catbox, self._up_0x0]
             for uploader in queue:
                 try:
@@ -196,7 +207,7 @@ class ImageGenMod(loader.Module):
         await self._init_gen(message, provider="google")
 
     @loader.command(ru_doc="<промпт> - Генерация через Pollinations (Free, Flux/SDXL)")
-    async def ip(self, message: Message):
+    async def igp(self, message: Message):
         """Generate via Pollinations (Free)"""
         await self._init_gen(message, provider="pollinations")
 
@@ -206,26 +217,21 @@ class ImageGenMod(loader.Module):
         args = utils.get_args_raw(message)
         history = self.db.get("ImageGen", "history", [])
         
-        if not history:
-            return await utils.answer(message, self.strings("history_empty"))
+        if not history: return await utils.answer(message, self.strings("history_empty"))
 
-        # Если аргументов нет - чистим всё
         if not args:
             self.db.set("ImageGen", "history", [])
             self.url_cache.clear()
             return await utils.answer(message, self.strings("history_cleared"))
         
-        # Если есть аргумент - чистим N последних
         try:
             n = int(args)
             if n <= 0: raise ValueError
         except:
-            return await utils.answer(message, "❌ Arg must be integer > 0")
+            return await utils.answer(message, self.strings("arg_err"))
         
-        # Удаляем N с конца
         new_history = history[:-n]
         self.db.set("ImageGen", "history", new_history)
-        
         await utils.answer(message, self.strings("history_cleared_n").format(n))
 
     async def _init_gen(self, message, provider):
@@ -249,9 +255,12 @@ class ImageGenMod(loader.Module):
                 except: pass
 
         model_name = self.config["model_google"] if provider == "google" else self.config["model_pollinations"]
+        
+        # Определяем статус (генерация или редактирование)
+        status_key = "edit_new" if input_bytes else "gen_new"
 
         msg = await self.inline.form(
-            text=self.strings("gen_new").format(utils.escape_html(user_prompt), model_name),
+            text=self.strings(status_key).format(utils.escape_html(user_prompt), model_name),
             message=message,
             reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]]
         )
@@ -265,7 +274,8 @@ class ImageGenMod(loader.Module):
             "index": -1, 
             "input_img": input_bytes, 
             "from_history": False,
-            "model": model_name
+            "model": model_name,
+            "text_page": 0 # Для пагинации текста
         }
         await self._process_gen(msg, sid)
 
@@ -273,13 +283,14 @@ class ImageGenMod(loader.Module):
         if sid not in self.sessions: return await self._safe_close(target)
         session = self.sessions[sid]
         provider = session["provider"]
+        model = session["model"]
         
         try:
             img_bytes = None
             text_resp = ""
 
             if provider == "google":
-                data = await self._call_google(session["model"], session["api_prompt"], session.get("input_img"))
+                data = await self._call_google(model, session["api_prompt"], session.get("input_img"))
                 if isinstance(data, dict) and "error" in data:
                     raise ValueError(json.dumps(data, indent=2, ensure_ascii=False))
                 
@@ -290,24 +301,24 @@ class ImageGenMod(loader.Module):
                         if "inlineData" in part: img_b64 = part["inlineData"]["data"]
                         if "text" in part: text_resp += part["text"]
                     
-                    if not img_b64:
-                         if text_resp: raise ValueError(f"No image, only text:\n{text_resp}")
-                         else: raise ValueError("No data found")
-                    
-                    img_bytes = base64.b64decode(img_b64)
+                    if img_b64:
+                        img_bytes = base64.b64decode(img_b64)
+                    else:
+                        # Если картинки нет, работаем только с текстом
+                        logger.warning("No image returned, only text.")
                 except Exception as e:
                      if not isinstance(e, ValueError): raise ValueError(f"Structure Error: {data}")
                      raise e
 
             elif provider == "pollinations":
-                data = await self._call_pollinations(session["model"], session["api_prompt"])
+                data = await self._call_pollinations(model, session["api_prompt"])
                 if isinstance(data, dict) and "error" in data:
                     raise ValueError(data["error"]["message"])
                 img_bytes = data
             
-            # Save history
+            # Сохранение в историю (даже если только текст)
             hist_id = str(uuid.uuid4())
-            b64_for_db = base64.b64encode(img_bytes).decode('utf-8')
+            b64_for_db = base64.b64encode(img_bytes).decode('utf-8') if img_bytes else None
             
             history = self.db.get("ImageGen", "history", [])
             history.append({
@@ -315,19 +326,24 @@ class ImageGenMod(loader.Module):
                 "prompt": session["display_prompt"], 
                 "bytes": b64_for_db, 
                 "text_resp": text_resp,
-                "provider": provider
+                "provider": provider,
+                "model": model,
+                "is_edit": bool(session.get("input_img")) # Флаг редактирования
             })
             self.db.set("ImageGen", "history", history[-30:])
 
             if hasattr(target, "edit"):
                 await target.edit(self.strings("uploading"), reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
 
-            img_url = await self._upload_image(img_bytes)
-            if not img_url: raise ValueError("Upload failed")
+            img_url = None
+            if img_bytes:
+                img_url = await self._upload_image(img_bytes)
+                if not img_url: raise ValueError("Upload failed")
             
             self.url_cache[hist_id] = img_url
             session["images"].append({"url": img_url, "text": text_resp})
             session["index"] = len(session["images"]) - 1
+            session["text_page"] = 0 # Сброс страницы текста
             
             await self._update_gen_view(target, sid)
 
@@ -357,7 +373,7 @@ class ImageGenMod(loader.Module):
         file.name = "error_log.txt"
         try:
             await self._client.send_file("me", file, caption=self.strings("log_caption"))
-            await call.answer("Log sent to Saved Messages!")
+            await call.answer("Лог отправлен в Избранное!")
         except Exception as e: await call.answer(f"Failed: {e}", show_alert=True)
 
     async def _update_gen_view(self, target, sid):
@@ -367,28 +383,61 @@ class ImageGenMod(loader.Module):
         total = len(s["images"])
         
         current_data = s["images"][idx]
-        img_url = current_data["url"]
+        img_url = current_data.get("url")
         ai_text = current_data.get("text", "")
         safe_prompt = utils.escape_html(s["display_prompt"])
+        model_name = s.get("model", "Unknown")
+        is_edit = s.get("input_img") is not None
         
-        if ai_text:
-             text_to_show = self.strings("success_with_text").format(safe_prompt, utils.escape_html(ai_text.strip()))
+        # --- LOGIC FOR TEXT ---
+        # Пагинация текста
+        text_page = s.get("text_page", 0)
+        chunk_size = 800
+        text_chunks = [ai_text[i:i+chunk_size] for i in range(0, len(ai_text), chunk_size)] if ai_text else []
+        total_text_pages = len(text_chunks)
+        
+        if text_page >= total_text_pages: text_page = max(0, total_text_pages - 1)
+        s["text_page"] = text_page # сохраняем нормализованное значение
+        
+        current_text = text_chunks[text_page] if text_chunks else ""
+        
+        # --- SELECT STRING KEY ---
+        if img_url:
+            if is_edit:
+                key = "edit_success_text" if ai_text else "edit_success"
+            else:
+                key = "success_with_text" if ai_text else "success"
         else:
-             text_to_show = self.strings("success").format(safe_prompt)
-        
-        nav_row = []
-        if total > 1:
-            nav_row.append({"text": "⬅️", "callback": self._nav_gen_cb, "args": (sid, -1)})
-            nav_row.append({"text": f"{idx + 1}/{total}", "callback": self._dummy_cb})
-            nav_row.append({"text": "➡️", "callback": self._nav_gen_cb, "args": (sid, 1)})
+            key = "only_text_response"
 
-        kb = []
-        if nav_row: kb.append(nav_row)
+        # --- FORMAT TEXT ---
+        if ai_text:
+            text_to_show = self.strings(key).format(model_name, safe_prompt, text_page + 1, total_text_pages, utils.escape_html(current_text.strip()))
+        else:
+             text_to_show = self.strings(key).format(model_name, safe_prompt)
         
+        # --- KEYBOARD ---
+        kb = []
+        
+        # 1. Image Nav
+        if total > 1:
+            nav_row = []
+            nav_row.append({"text": "⬅️ Картинка", "callback": self._nav_gen_cb, "args": (sid, -1)})
+            nav_row.append({"text": f"{idx + 1}/{total}", "callback": self._dummy_cb})
+            nav_row.append({"text": "Картинка ➡️", "callback": self._nav_gen_cb, "args": (sid, 1)})
+            kb.append(nav_row)
+        
+        # 2. Text Nav (New!)
+        if total_text_pages > 1:
+             text_nav = []
+             text_nav.append({"text": "📝 <", "callback": self._nav_text_cb, "args": (sid, -1)})
+             text_nav.append({"text": f"Стр {text_page + 1}/{total_text_pages}", "callback": self._dummy_cb})
+             text_nav.append({"text": "> 📝", "callback": self._nav_text_cb, "args": (sid, 1)})
+             kb.append(text_nav)
+
         ctrl_row = []
         ctrl_row.append({"text": self.strings("btn_regen"), "callback": self._regen_cb, "args": (sid,)})
-        if s["provider"] == "google":
-             ctrl_row.append({"text": self.strings("btn_model"), "callback": self._model_menu, "args": (sid,)})
+        ctrl_row.append({"text": self.strings("btn_model"), "callback": self._model_menu, "args": (sid,)})
         kb.append(ctrl_row)
         
         if s.get("from_history"):
@@ -398,50 +447,86 @@ class ImageGenMod(loader.Module):
 
         await target.edit(
             text=text_to_show,
-            photo=img_url,
-            reply_markup=kb
+            photo=img_url, # Может быть None, тогда фото удалится/не покажется
+            reply_markup=kb,
+            file=None if not img_url else None # Если урла нет, удаляем медиа
         )
 
-    # --- MODEL SWITCHER (Only Google) ---
-    async def _model_menu(self, call: InlineCall, sid):
-        if sid not in self.sessions: return await call.answer("Expired", show_alert=True)
-        
-        kb = [
-            [{"text": "🍌 Nano Banana Pro Preview", "callback": self._set_model_cb, "args": (sid, "nano-banana-pro-preview")}],
-            [{"text": "💎 Gemini 3 Pro Image Preview", "callback": self._set_model_cb, "args": (sid, "gemini-3-pro-image-preview")}],
-            [{"text": "⚡️ Gemini 2.5 Flash Image", "callback": self._set_model_cb, "args": (sid, "gemini-2.5-flash-image")}],
-            [{"text": "🔙 Назад", "callback": self._back_to_gen, "args": (sid,)}]
-        ]
-        
-        await call.edit(
-            text=self.strings("select_model"),
-            reply_markup=kb
-        )
-
-    async def _set_model_cb(self, call: InlineCall, sid, model_name):
-        if sid not in self.sessions: return await call.answer("Expired", show_alert=True)
-        self.sessions[sid]["model"] = model_name
-        await self._regen_cb(call, sid)
-
-    async def _back_to_gen(self, call: InlineCall, sid):
-        if sid not in self.sessions: return await call.answer("Expired")
-        await self._update_gen_view(call, sid)
-
+    # --- NAV HANDLERS ---
     async def _nav_gen_cb(self, call: InlineCall, sid, direction):
         if sid not in self.sessions: return await call.answer("Expired")
         s = self.sessions[sid]
         new_idx = s["index"] + direction
         if 0 <= new_idx < len(s["images"]):
             s["index"] = new_idx
+            s["text_page"] = 0 # Сброс текста при смене картинки
             await self._update_gen_view(call, sid)
         else: await call.answer("Край")
+
+    async def _nav_text_cb(self, call: InlineCall, sid, direction):
+        if sid not in self.sessions: return await call.answer("Expired")
+        s = self.sessions[sid]
+        # Вычисляем страницы
+        idx = s["index"]
+        ai_text = s["images"][idx].get("text", "")
+        chunk_size = 800
+        total_pages = (len(ai_text) + chunk_size - 1) // chunk_size
+        
+        new_page = s["text_page"] + direction
+        if 0 <= new_page < total_pages:
+            s["text_page"] = new_page
+            await self._update_gen_view(call, sid)
+        else: await call.answer("Край текста")
+
+    # --- UNIVERSAL MODEL SWITCHER ---
+    async def _model_menu(self, call: InlineCall, sid):
+        if sid not in self.sessions: return await call.answer("Expired", show_alert=True)
+        s = self.sessions[sid]
+        
+        is_edit_mode = s.get("input_img") is not None
+        
+        kb = [
+            # Google Models (Support both)
+            [{"text": "🍌 Nano Banana Pro", "callback": self._set_model_cb, "args": (sid, "nano-banana-pro-preview", "google")}],
+            [{"text": "💎 Gemini 3 Pro", "callback": self._set_model_cb, "args": (sid, "gemini-3-pro-image-preview", "google")}],
+            [{"text": "⚡️ Gemini 2.5 Flash", "callback": self._set_model_cb, "args": (sid, "gemini-2.5-flash-image", "google")}]
+        ]
+        
+        text_msg = self.strings("select_model")
+        
+        # Pollinations Models (Only Text-to-Image)
+        if not is_edit_mode:
+            kb.extend([
+                [{"text": "🌌 Flux (Pollinations)", "callback": self._set_model_cb, "args": (sid, "flux", "pollinations")}],
+                [{"text": "🚀 Turbo (Pollinations)", "callback": self._set_model_cb, "args": (sid, "turbo", "pollinations")}],
+                [{"text": "🎨 Midjourney (Pollinations)", "callback": self._set_model_cb, "args": (sid, "midjourney", "pollinations")}],
+                [{"text": "🎭 Deliberate (Pollinations)", "callback": self._set_model_cb, "args": (sid, "deliberate", "pollinations")}]
+            ])
+        else:
+            text_msg += self.strings("model_hidden_warn")
+            
+        kb.append([{"text": "🔙 Назад", "callback": self._back_to_gen, "args": (sid,)}])
+        
+        await call.edit(text=text_msg, reply_markup=kb)
+
+    async def _set_model_cb(self, call: InlineCall, sid, model_name, provider):
+        if sid not in self.sessions: return await call.answer("Expired", show_alert=True)
+        self.sessions[sid]["model"] = model_name
+        self.sessions[sid]["provider"] = provider
+        await self._regen_cb(call, sid)
+
+    async def _back_to_gen(self, call: InlineCall, sid):
+        if sid not in self.sessions: return await call.answer("Expired")
+        await self._update_gen_view(call, sid)
 
     async def _regen_cb(self, call: InlineCall, sid):
         if sid not in self.sessions: return await call.answer("Expired", show_alert=True)
         s = self.sessions[sid]
+        
+        status_key = "edit_var" if s.get("input_img") else "gen_var"
         await call.answer(f"Генерация ({s['model']})...")
         await call.edit(
-            self.strings("gen_var").format(utils.escape_html(s["display_prompt"]), s["model"]), 
+            self.strings(status_key).format(utils.escape_html(s["display_prompt"]), s["model"]), 
             reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]]
         )
         await self._process_gen(call, sid)
@@ -483,9 +568,15 @@ class ImageGenMod(loader.Module):
             
             for e in chunk:
                 p = e.get('prompt', '...')
-                prov_icon = "💠" if e.get("provider") == "pollinations" else "🖼"
+                prov = e.get("provider", "google")
+                is_edit = e.get("is_edit", False)
+                # Иконки: Редакт, Pollinations, Google
+                if is_edit: icon = "✏️"
+                elif prov == "pollinations": icon = "💠"
+                else: icon = "🖼"
+                
                 prompt_preview = (p[:20] + '..') if len(p) > 20 else p
-                kb.append([{"text": f"{prov_icon} {utils.escape_html(prompt_preview)}", "callback": self._view_hist_item, "args": (e['id'],)}])
+                kb.append([{"text": f"{icon} {utils.escape_html(prompt_preview)}", "callback": self._view_hist_item, "args": (e['id'],)}])
             
             nav_row = []
             if page > 0:
@@ -524,7 +615,7 @@ class ImageGenMod(loader.Module):
         item = history[index]
         img_url = self.url_cache.get(item["id"])
         
-        if not img_url:
+        if not img_url and item.get("bytes"):
             await call.edit(self.strings("uploading"), reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
             try:
                 img_bytes = base64.b64decode(item["bytes"])
@@ -532,15 +623,17 @@ class ImageGenMod(loader.Module):
                 if img_url: self.url_cache[item["id"]] = img_url
             except: pass
         
-        if not img_url: return await call.answer("Ошибка загрузки", show_alert=True)
-
+        # Если картинки нет, но есть байты (значит ошибка загрузки) или просто текста
+        # Показываем что есть
+        
         safe_prompt = utils.escape_html(item.get('prompt', 'image'))
         ai_text = item.get("text_resp", "")
+        model_name = item.get("model", "Неизвестно")
 
         if ai_text:
-            text_to_show = self.strings("history_item_text").format(index + 1, len(history), safe_prompt, utils.escape_html(ai_text.strip()))
+            text_to_show = self.strings("history_item_text").format(index + 1, len(history), model_name, safe_prompt, utils.escape_html(ai_text.strip()))
         else:
-            text_to_show = self.strings("history_item").format(index + 1, len(history), safe_prompt)
+            text_to_show = self.strings("history_item").format(index + 1, len(history), model_name, safe_prompt)
 
         nav = []
         if index > 0:
@@ -588,7 +681,7 @@ class ImageGenMod(loader.Module):
     async def _regen_from_hist(self, call: InlineCall, prompt, provider):
         sid = str(uuid.uuid4())
         model = self.config["model_google"] if provider == "google" else self.config["model_pollinations"]
-        self.sessions[sid] = {"provider": provider, "api_prompt": prompt, "display_prompt": prompt, "images": [], "index": -1, "input_img": None, "from_history": True, "model": model}
+        self.sessions[sid] = {"provider": provider, "api_prompt": prompt, "display_prompt": prompt, "images": [], "index": -1, "input_img": None, "from_history": True, "model": model, "text_page": 0}
         await self._regen_cb(call, sid)
 
     async def _clear_all_cb(self, call: InlineCall):
