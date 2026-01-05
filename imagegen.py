@@ -379,7 +379,7 @@ class ImageGenMod(loader.Module):
     async def _model_menu(self, call: InlineCall, sid):
         if sid not in self.sessions: return await call.answer("Expired", show_alert=True)
         
-        # Исправленные названия, как ты просил
+        # да
         kb = [
             [{"text": "🍌 Nano Banana Pro Preview", "callback": self._set_model_cb, "args": (sid, "nano-banana-pro-preview")}],
             [{"text": "💎 Gemini 3 Pro Image Preview", "callback": self._set_model_cb, "args": (sid, "gemini-3-pro-image-preview")}],
