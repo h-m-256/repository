@@ -1,5 +1,4 @@
 # meta developer: @h_m_256
-# requires: Pillow
 # написано с помощью ии ☃️
 import aiohttp
 import base64
@@ -59,10 +58,7 @@ class ImageGenMod(loader.Module):
                 "gemini-2.5-flash-image",
                 "gemini-2.5-flash-image-preview",
                 "gemini-3-pro-image-preview",
-                "nano-banana-pro-preview",
-                "imagen-4.0-generate-001",
-                "imagen-4.0-ultra-generate-001",
-                "imagen-4.0-fast-generate-001"
+                "nano-banana-pro-preview"
             ])),
             loader.ConfigValue("quality", "Low", lambda: self.strings("quality"), validator=loader.validators.Choice(["Low", "Medium", "High", "Original"])),
             loader.ConfigValue("prefix", "", lambda: self.strings("prefix")),
@@ -194,7 +190,6 @@ class ImageGenMod(loader.Module):
         )
         
         sid = str(uuid.uuid4())
-        # Сохраняем модель в сессию
         self.sessions[sid] = {
             "api_prompt": api_prompt, 
             "display_prompt": user_prompt, 
@@ -202,7 +197,7 @@ class ImageGenMod(loader.Module):
             "index": -1, 
             "input_img": input_bytes, 
             "from_history": False,
-            "model": self.config["model"] # Начальная модель из конфига
+            "model": self.config["model"]
         }
         await self._process_gen(msg, sid)
 
@@ -211,7 +206,6 @@ class ImageGenMod(loader.Module):
         session = self.sessions[sid]
         
         try:
-            # Передаем модель из сессии
             data = await self._call_api(session["model"], session["api_prompt"], session.get("input_img"))
             if not data or "error" in data:
                 err_msg = json.dumps(data, indent=2, ensure_ascii=False) if data else "Empty response"
@@ -305,10 +299,9 @@ class ImageGenMod(loader.Module):
         kb = []
         if nav_row: kb.append(nav_row)
         
-        # Кнопки управления
         ctrl_row = []
         ctrl_row.append({"text": self.strings("btn_regen"), "callback": self._regen_cb, "args": (sid,)})
-        ctrl_row.append({"text": self.strings("btn_model"), "callback": self._model_menu, "args": (sid,)}) # Кнопка смены модели
+        ctrl_row.append({"text": self.strings("btn_model"), "callback": self._model_menu, "args": (sid,)})
         kb.append(ctrl_row)
         
         if s.get("from_history"):
@@ -328,8 +321,8 @@ class ImageGenMod(loader.Module):
         
         kb = [
             [{"text": "🍌 Nano Banana Pro", "callback": self._set_model_cb, "args": (sid, "gemini-3-pro-image-preview")}],
+            [{"text": "🍌 Nano Banana", "callback": self._set_model_cb, "args": (sid, "nano-banana-pro-preview")}],
             [{"text": "⚡️ Flash 2.5", "callback": self._set_model_cb, "args": (sid, "gemini-2.5-flash-image")}],
-            [{"text": "🖼 Imagen 4", "callback": self._set_model_cb, "args": (sid, "imagen-4.0-generate-001")}],
             [{"text": "🔙 Назад", "callback": self._back_to_gen, "args": (sid,)}]
         ]
         
@@ -341,14 +334,11 @@ class ImageGenMod(loader.Module):
     async def _set_model_cb(self, call: InlineCall, sid, model_name):
         if sid not in self.sessions: return await call.answer("Expired", show_alert=True)
         self.sessions[sid]["model"] = model_name
-        # Сразу запускаем реген с новой моделью
         await self._regen_cb(call, sid)
 
     async def _back_to_gen(self, call: InlineCall, sid):
         if sid not in self.sessions: return await call.answer("Expired")
         await self._update_gen_view(call, sid)
-
-    # ----------------------
 
     async def _nav_gen_cb(self, call: InlineCall, sid, direction):
         if sid not in self.sessions: return await call.answer("Expired")
@@ -387,24 +377,48 @@ class ImageGenMod(loader.Module):
         
         await self._render_history_slide(FakeCall(msg), 0)
 
-    async def _show_history_menu(self, target):
+    async def _show_history_menu(self, target, page=0):
         history = self.db.get("ImageGen", "history", [])
         text = self.strings("history_empty") if not history else "<b>📝 История генераций:</b>"
-        
-        # Статичная картинка из списка
         list_img = "https://raw.githubusercontent.com/h-m-256/repository/refs/heads/main/media/list_mode.png"
         
         kb = []
         if history:
-            for e in reversed(history[-5:]):
+            limit = 5
+            # Сортировка: новые сверху (reversed)
+            rev_history = list(reversed(history))
+            total_items = len(rev_history)
+            total_pages = (total_items + limit - 1) // limit
+            
+            if page < 0: page = 0
+            if page >= total_pages: page = max(0, total_pages - 1)
+            
+            offset = page * limit
+            chunk = rev_history[offset : offset + limit]
+            
+            for e in chunk:
                 p = e.get('prompt', '...')
                 prompt_preview = (p[:25] + '..') if len(p) > 25 else p
                 kb.append([{"text": f"🖼 {utils.escape_html(prompt_preview)}", "callback": self._view_hist_item, "args": (e['id'],)}])
+            
+            # Навигация по страницам
+            nav_row = []
+            if page > 0:
+                nav_row.append({"text": "⬅️", "callback": self._menu_nav_cb, "args": (page - 1,)})
+            if total_pages > 1:
+                nav_row.append({"text": f"{page + 1}/{total_pages}", "callback": self._dummy_cb})
+            if page < total_pages - 1:
+                nav_row.append({"text": "➡️", "callback": self._menu_nav_cb, "args": (page + 1,)})
+            if nav_row: kb.append(nav_row)
+
             kb.append([{"text": self.strings("btn_slideshow"), "callback": self._start_slideshow}])
             kb.append([{"text": self.strings("btn_clear"), "callback": self._clear_all_cb}])
         kb.append([{"text": self.strings("btn_close"), "callback": self._safe_close}])
 
         await target.edit(text, reply_markup=kb, photo=list_img)
+
+    async def _menu_nav_cb(self, call: InlineCall, page):
+        await self._show_history_menu(call, page)
 
     async def _start_slideshow(self, call: InlineCall):
         history = self.db.get("ImageGen", "history", [])
@@ -468,7 +482,7 @@ class ImageGenMod(loader.Module):
         await self._render_history_slide(call, new_index)
 
     async def _back_to_menu(self, call: InlineCall):
-        await self._show_history_menu(call)
+        await self._show_history_menu(call, 0)
 
     async def _del_one_cb(self, call: InlineCall, item_id):
         history = self.db.get("ImageGen", "history", [])
@@ -487,7 +501,6 @@ class ImageGenMod(loader.Module):
 
     async def _regen_from_hist(self, call: InlineCall, prompt):
         sid = str(uuid.uuid4())
-        # При регене из истории берем модель из конфига (дефолтную)
         self.sessions[sid] = {"api_prompt": prompt, "display_prompt": prompt, "images": [], "index": -1, "input_img": None, "from_history": True, "model": self.config["model"]}
         await self._regen_cb(call, sid)
 
