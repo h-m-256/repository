@@ -35,6 +35,7 @@ class ImageGenMod(loader.Module):
         "success_with_text": "✅ <b>Готово!</b>\n<i>{}</i>\n\n<blockquote expandable>{}</blockquote>",
         "history_empty": "❌ История пуста!",
         "history_cleared": "✅ История очищена!",
+        "history_cleared_n": "✅ Удалено последних записей: {}",
         "history_item": "🖼 <b>История [{}/{}]</b>\n<i>{}</i>",
         "history_item_text": "🖼 <b>История [{}/{}]</b>\n<i>{}</i>\n\n<blockquote expandable>{}</blockquote>",
         "no_api": "❌ <b>Не установлен API ключ для Google!</b>",
@@ -91,6 +92,25 @@ class ImageGenMod(loader.Module):
         except: return img_bytes
 
     # --- UPLOADERS ---
+    
+    async def _up_x0(self, session, img_bytes):
+        data = aiohttp.FormData()
+        data.add_field('file', img_bytes, filename='image.png', content_type='image/png')
+        async with session.post('https://x0.at', data=data, timeout=15) as resp:
+            if resp.status == 200: return await resp.text()
+        return None
+
+    async def _up_tmpfiles(self, session, img_bytes):
+        data = aiohttp.FormData()
+        data.add_field('file', img_bytes, filename='image.jpg', content_type='image/jpeg')
+        async with session.post('https://tmpfiles.org/api/v1/upload', data=data, timeout=15) as resp:
+            if resp.status == 200:
+                res = await resp.json()
+                url = res['data']['url']
+                # Tmpfiles возвращает ссылку на вьювер, для прямой нужно добавить /dl/
+                return url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
+        return None
+
     async def _up_catbox(self, session, img_bytes):
         data = aiohttp.FormData()
         data.add_field('reqtype', 'fileupload')
@@ -106,16 +126,10 @@ class ImageGenMod(loader.Module):
             if resp.status == 200: return await resp.text()
         return None
 
-    async def _up_x0(self, session, img_bytes):
-        data = aiohttp.FormData()
-        data.add_field('file', img_bytes, filename='image.png', content_type='image/png')
-        async with session.post('https://x0.at', data=data, timeout=15) as resp:
-            if resp.status == 200: return await resp.text()
-        return None
-
     async def _upload_image(self, img_bytes):
         async with aiohttp.ClientSession() as session:
-            queue = [self._up_catbox, self._up_0x0, self._up_x0]
+            # Приоритет: x0 > tmpfiles > catbox > 0x0
+            queue = [self._up_x0, self._up_tmpfiles, self._up_catbox, self._up_0x0]
             for uploader in queue:
                 try:
                     url = await uploader(session, img_bytes)
@@ -125,7 +139,6 @@ class ImageGenMod(loader.Module):
 
     # --- APIs ---
     
-    # 1. Google Gemini API
     async def _call_google(self, model_name: str, prompt: str, input_image_bytes=None):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.config['api_key']}"
         parts = [{"text": prompt}]
@@ -160,10 +173,7 @@ class ImageGenMod(loader.Module):
                 except Exception as e: return {"error": {"message": str(e)}}
             return {"error": {"message": "Resource exhausted (429)"}}
 
-    # 2. Pollinations API (Free)
     async def _call_pollinations(self, model_name: str, prompt: str):
-        # Pollinations не требует ключа, возвращает сразу картинку
-        # Seed нужен для уникальности, иначе на один промпт будет одна картинка
         seed = random.randint(0, 999999999)
         url = f"https://image.pollinations.ai/prompt/{prompt}?width=1280&height=1280&seed={seed}&model={model_name}&nologo=True"
         
@@ -171,7 +181,7 @@ class ImageGenMod(loader.Module):
             try:
                 async with session.get(url, timeout=60) as resp:
                     if resp.status == 200:
-                        return await resp.read() # Возвращает bytes
+                        return await resp.read()
                     else:
                         text = await resp.text()
                         return {"error": {"message": f"Pollinations Error {resp.status}: {text[:200]}"}}
@@ -190,6 +200,34 @@ class ImageGenMod(loader.Module):
         """Generate via Pollinations (Free)"""
         await self._init_gen(message, provider="pollinations")
 
+    @loader.command(ru_doc="[N] - Очистить историю (все или N последних)")
+    async def igclear(self, message: Message):
+        """[N] - Clear history (all or last N)"""
+        args = utils.get_args_raw(message)
+        history = self.db.get("ImageGen", "history", [])
+        
+        if not history:
+            return await utils.answer(message, self.strings("history_empty"))
+
+        # Если аргументов нет - чистим всё
+        if not args:
+            self.db.set("ImageGen", "history", [])
+            self.url_cache.clear()
+            return await utils.answer(message, self.strings("history_cleared"))
+        
+        # Если есть аргумент - чистим N последних
+        try:
+            n = int(args)
+            if n <= 0: raise ValueError
+        except:
+            return await utils.answer(message, "❌ Arg must be integer > 0")
+        
+        # Удаляем N с конца
+        new_history = history[:-n]
+        self.db.set("ImageGen", "history", new_history)
+        
+        await utils.answer(message, self.strings("history_cleared_n").format(n))
+
     async def _init_gen(self, message, provider):
         args = utils.get_args_raw(message)
         if not args and not self.config["prefix"]: return await utils.answer(message, "Введите промпт")
@@ -198,11 +236,9 @@ class ImageGenMod(loader.Module):
             return await utils.answer(message, self.strings("no_api"))
         
         user_prompt = args.strip() if args.strip() else "..."
-        # Префикс добавляем только если он есть
         full_prompt = (self.config["prefix"] + " " + args).strip()
         
         input_bytes = None
-        # Фото считываем только для Google, Pollinations (через GET) пока text-only в этом модуле
         if provider == "google":
             reply = await message.get_reply_message()
             if (reply and reply.media) or message.media:
@@ -242,13 +278,11 @@ class ImageGenMod(loader.Module):
             img_bytes = None
             text_resp = ""
 
-            # === GOOGLE LOGIC ===
             if provider == "google":
                 data = await self._call_google(session["model"], session["api_prompt"], session.get("input_img"))
                 if isinstance(data, dict) and "error" in data:
                     raise ValueError(json.dumps(data, indent=2, ensure_ascii=False))
                 
-                # Парсим ответ Google
                 try:
                     parts = data["candidates"][0]["content"]["parts"]
                     img_b64 = None
@@ -262,23 +296,17 @@ class ImageGenMod(loader.Module):
                     
                     img_bytes = base64.b64decode(img_b64)
                 except Exception as e:
-                     # Если это не ValueError (который мы сами кинули), то ошибка структуры
-                     if not isinstance(e, ValueError):
-                         raise ValueError(f"Structure Error: {data}")
+                     if not isinstance(e, ValueError): raise ValueError(f"Structure Error: {data}")
                      raise e
 
-            # === POLLINATIONS LOGIC ===
             elif provider == "pollinations":
                 data = await self._call_pollinations(session["model"], session["api_prompt"])
                 if isinstance(data, dict) and "error" in data:
                     raise ValueError(data["error"]["message"])
-                # Pollinations возвращает байты сразу
                 img_bytes = data
             
-            # === SAVING ===
+            # Save history
             hist_id = str(uuid.uuid4())
-            # Сохраняем в историю (без base64, конвертируем в B64 для БД чтобы было унифицировано)
-            # Хотя стоп, для БД нам нужен base64 строки
             b64_for_db = base64.b64encode(img_bytes).decode('utf-8')
             
             history = self.db.get("ImageGen", "history", [])
@@ -287,7 +315,7 @@ class ImageGenMod(loader.Module):
                 "prompt": session["display_prompt"], 
                 "bytes": b64_for_db, 
                 "text_resp": text_resp,
-                "provider": provider # Полезно знать, откуда картинка
+                "provider": provider
             })
             self.db.set("ImageGen", "history", history[-30:])
 
@@ -359,7 +387,6 @@ class ImageGenMod(loader.Module):
         
         ctrl_row = []
         ctrl_row.append({"text": self.strings("btn_regen"), "callback": self._regen_cb, "args": (sid,)})
-        # Меню моделей показываем только для Google, т.к. для Pollinations мы не делали сложного свитчера (пока)
         if s["provider"] == "google":
              ctrl_row.append({"text": self.strings("btn_model"), "callback": self._model_menu, "args": (sid,)})
         kb.append(ctrl_row)
@@ -379,7 +406,6 @@ class ImageGenMod(loader.Module):
     async def _model_menu(self, call: InlineCall, sid):
         if sid not in self.sessions: return await call.answer("Expired", show_alert=True)
         
-        # да
         kb = [
             [{"text": "🍌 Nano Banana Pro Preview", "callback": self._set_model_cb, "args": (sid, "nano-banana-pro-preview")}],
             [{"text": "💎 Gemini 3 Pro Image Preview", "callback": self._set_model_cb, "args": (sid, "gemini-3-pro-image-preview")}],
@@ -401,8 +427,6 @@ class ImageGenMod(loader.Module):
         if sid not in self.sessions: return await call.answer("Expired")
         await self._update_gen_view(call, sid)
 
-    # ----------------------
-
     async def _nav_gen_cb(self, call: InlineCall, sid, direction):
         if sid not in self.sessions: return await call.answer("Expired")
         s = self.sessions[sid]
@@ -415,8 +439,6 @@ class ImageGenMod(loader.Module):
     async def _regen_cb(self, call: InlineCall, sid):
         if sid not in self.sessions: return await call.answer("Expired", show_alert=True)
         s = self.sessions[sid]
-        
-        # Отображаем модель в статусе
         await call.answer(f"Генерация ({s['model']})...")
         await call.edit(
             self.strings("gen_var").format(utils.escape_html(s["display_prompt"]), s["model"]), 
@@ -461,7 +483,6 @@ class ImageGenMod(loader.Module):
             
             for e in chunk:
                 p = e.get('prompt', '...')
-                # Добавляем метку провайдера, если есть
                 prov_icon = "💠" if e.get("provider") == "pollinations" else "🖼"
                 prompt_preview = (p[:20] + '..') if len(p) > 20 else p
                 kb.append([{"text": f"{prov_icon} {utils.escape_html(prompt_preview)}", "callback": self._view_hist_item, "args": (e['id'],)}])
@@ -531,9 +552,7 @@ class ImageGenMod(loader.Module):
         kb = [nav]
         actions = []
         actions.append({"text": self.strings("btn_del_one"), "callback": self._del_one_cb, "args": (item['id'],)})
-        # При регене из истории нужно понять, какой был провайдер. Если старая запись - считаем google
         prov = item.get("provider", "google")
-        # В кнопке регена не передаем провайдера, но передадим промпт. Логику определения провайдера вынесем в метод
         actions.append({"text": self.strings("btn_regen"), "callback": self._regen_from_hist, "args": (item.get('prompt', ''), prov)})
         actions.append({"text": self.strings("btn_list"), "callback": self._back_to_menu})
         kb.append(actions)
@@ -568,19 +587,8 @@ class ImageGenMod(loader.Module):
 
     async def _regen_from_hist(self, call: InlineCall, prompt, provider):
         sid = str(uuid.uuid4())
-        # Определяем модель по провайдеру
         model = self.config["model_google"] if provider == "google" else self.config["model_pollinations"]
-        
-        self.sessions[sid] = {
-            "provider": provider,
-            "api_prompt": prompt, 
-            "display_prompt": prompt, 
-            "images": [], 
-            "index": -1, 
-            "input_img": None, 
-            "from_history": True, 
-            "model": model
-        }
+        self.sessions[sid] = {"provider": provider, "api_prompt": prompt, "display_prompt": prompt, "images": [], "index": -1, "input_img": None, "from_history": True, "model": model}
         await self._regen_cb(call, sid)
 
     async def _clear_all_cb(self, call: InlineCall):
