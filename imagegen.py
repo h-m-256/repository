@@ -1,6 +1,6 @@
 # meta developer: @h_m_256
 # написано с помощью ии ☃️
-# ебать тут конечно вайбкода, но ладно
+# вайбкодинг захватит мир, вайбкоооодинг..
 import aiohttp
 import base64
 import uuid
@@ -27,13 +27,13 @@ class ImageGenMod(loader.Module):
         "model_pollinations": "Модель Pollinations (для .igp)",
         "quality": "Качество загружаемых фото (для .ig)",
         "prefix": "Префикс промпта (стиль и т.д.)",
+        "storage_mode": "Режим хранения истории (Base64=Тяжело/Надежно, URL=Легко/Хостинг, None=Без истории)",
+        "history_limit": "Лимит записей в истории",
         
         # Генерация
         "gen_new": "🎨 <b>Генерация...</b>\n<i>{}</i>\n🔮 <b>Модель:</b> {}",
         "gen_var": "🎨 <b>Генерация нового варианта...</b>\n<i>{}</i>\n🔮 <b>Модель:</b> {}",
         "success": "✅ <b>Готово!</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>",
-        
-        # Исправленный формат с текстом
         "success_with_text": "✅ <b>Готово!</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>\n\n📜 <b>Ответ ИИ (Стр. {}/{}):</b>\n<blockquote expandable>{}</blockquote>",
         
         # Редактирование
@@ -51,7 +51,8 @@ class ImageGenMod(loader.Module):
         "history_cleared": "✅ История очищена!",
         "history_cleared_n": "✅ Удалено последних записей: {}",
         "history_item": "🖼 <b>История [{}/{}]</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>",
-        "history_item_text": "🖼 <b>История [{}/{}]</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>\n\n<blockquote expandable>{}</blockquote>",
+        "history_item_text": "🖼 <b>История [{}/{}]</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>\n\n📜 <b>Ответ ИИ (Стр. {}/{}):</b>\n<blockquote expandable>{}</blockquote>",
+        
         "no_api": "❌ <b>Не установлен API ключ для Google!</b>",
         "btn_regen": "🔄 Еще вариант",
         "btn_back": "🔙 Меню",
@@ -82,6 +83,8 @@ class ImageGenMod(loader.Module):
             loader.ConfigValue("model_pollinations", "flux", lambda: self.strings("model_pollinations"), validator=loader.validators.Choice([
                 "flux", "turbo", "midjourney", "deliberate"
             ])),
+            loader.ConfigValue("storage_mode", "Base64", lambda: self.strings("storage_mode"), validator=loader.validators.Choice(["Base64", "URL", "None"])),
+            loader.ConfigValue("history_limit", 20, lambda: self.strings("history_limit"), validator=loader.validators.Integer(minimum=1)),
             loader.ConfigValue("quality", "Low", lambda: self.strings("quality"), validator=loader.validators.Choice(["Low", "Medium", "High", "Original"])),
             loader.ConfigValue("prefix", "", lambda: self.strings("prefix")),
         )
@@ -140,9 +143,15 @@ class ImageGenMod(loader.Module):
             if resp.status == 200: return await resp.text()
         return None
 
-    async def _upload_image(self, img_bytes):
+    async def _upload_image(self, img_bytes, permanent=False):
         async with aiohttp.ClientSession() as session:
-            queue = [self._up_x0, self._up_tmpfiles, self._up_catbox, self._up_0x0]
+            # Если нужно надежное хранение (URL mode), ставим Catbox первым
+            if permanent:
+                queue = [self._up_catbox, self._up_x0, self._up_tmpfiles, self._up_0x0]
+            else:
+                # Для временного показа - быстрые хостинги
+                queue = [self._up_x0, self._up_tmpfiles, self._up_catbox, self._up_0x0]
+                
             for uploader in queue:
                 try:
                     url = await uploader(session, img_bytes)
@@ -290,18 +299,14 @@ class ImageGenMod(loader.Module):
                 data = await self._call_google(model, session["api_prompt"], session.get("input_img"))
                 if isinstance(data, dict) and "error" in data:
                     raise ValueError(json.dumps(data, indent=2, ensure_ascii=False))
-                
                 try:
                     parts = data["candidates"][0]["content"]["parts"]
                     img_b64 = None
                     for part in parts:
                         if "inlineData" in part: img_b64 = part["inlineData"]["data"]
                         if "text" in part: text_resp += part["text"]
-                    
-                    if img_b64:
-                        img_bytes = base64.b64decode(img_b64)
-                    elif not text_resp:
-                        raise ValueError("No data found")
+                    if img_b64: img_bytes = base64.b64decode(img_b64)
+                    elif not text_resp: raise ValueError("No data found")
                 except Exception as e:
                      if not isinstance(e, ValueError): raise ValueError(f"Structure Error: {data}")
                      raise e
@@ -312,31 +317,55 @@ class ImageGenMod(loader.Module):
                     raise ValueError(data["error"]["message"])
                 img_bytes = data
             
+            # --- Saving Logic ---
+            storage = self.config["storage_mode"]
             hist_id = str(uuid.uuid4())
-            b64_for_db = base64.b64encode(img_bytes).decode('utf-8') if img_bytes else None
             
-            history = self.db.get("ImageGen", "history", [])
-            history.append({
-                "id": hist_id, 
-                "prompt": session["display_prompt"], 
-                "bytes": b64_for_db, 
-                "text_resp": text_resp,
-                "provider": provider,
-                "model": model,
-                "is_edit": bool(session.get("input_img"))
-            })
-            self.db.set("ImageGen", "history", history[-30:])
-
+            # Variables for session and DB
+            db_b64 = None
+            db_url = None
+            display_url = None # URL for current session display
+            
             if hasattr(target, "edit"):
                 await target.edit(self.strings("uploading"), reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
 
-            img_url = None
-            if img_bytes:
-                img_url = await self._upload_image(img_bytes)
-                if not img_url: raise ValueError("Upload failed")
+            # 1. Handle URL storage (Upload FIRST)
+            if storage == "URL" and img_bytes:
+                db_url = await self._upload_image(img_bytes, permanent=True)
+                display_url = db_url # Use this URL for display
             
-            self.url_cache[hist_id] = img_url
-            session["images"].append({"url": img_url, "text": text_resp})
+            # 2. Handle Base64 storage
+            if storage == "Base64" and img_bytes:
+                db_b64 = base64.b64encode(img_bytes).decode('utf-8')
+                # Upload to temp host for display
+                display_url = await self._upload_image(img_bytes, permanent=False)
+
+            # 3. Handle None storage (Just upload for display)
+            if storage == "None" and img_bytes:
+                display_url = await self._upload_image(img_bytes, permanent=False)
+
+            # Save to DB if not None
+            if storage != "None":
+                history = self.db.get("ImageGen", "history", [])
+                history.append({
+                    "id": hist_id, 
+                    "prompt": session["display_prompt"], 
+                    "bytes": db_b64, # Saved only if Base64 mode
+                    "url": db_url,   # Saved only if URL mode
+                    "text_resp": text_resp,
+                    "provider": provider,
+                    "model": model,
+                    "is_edit": bool(session.get("input_img"))
+                })
+                # Apply Limit
+                limit = self.config["history_limit"]
+                self.db.set("ImageGen", "history", history[-limit:])
+            
+            # Cache URL for current session to avoid re-uploading immediately
+            if display_url:
+                self.url_cache[hist_id] = display_url
+
+            session["images"].append({"url": display_url, "text": text_resp})
             session["index"] = len(session["images"]) - 1
             session["text_page"] = 0
             
@@ -383,27 +412,21 @@ class ImageGenMod(loader.Module):
         model_name = s.get("model", "Unknown")
         is_edit = s.get("input_img") is not None
         
-        # Text pagination
+        # Pagination
         text_page = s.get("text_page", 0)
         chunk_size = 800
         text_chunks = [ai_text[i:i+chunk_size] for i in range(0, len(ai_text), chunk_size)] if ai_text else []
         total_text_pages = len(text_chunks)
-        
         if text_page >= total_text_pages: text_page = max(0, total_text_pages - 1)
         s["text_page"] = text_page
-        
         current_text = text_chunks[text_page] if text_chunks else ""
         
-        # Select key
         if img_url:
-            if is_edit:
-                key = "edit_success_text" if ai_text else "edit_success"
-            else:
-                key = "success_with_text" if ai_text else "success"
+            if is_edit: key = "edit_success_text" if ai_text else "edit_success"
+            else: key = "success_with_text" if ai_text else "success"
         else:
             key = "only_text_response"
 
-        # Format string (FIXED ORDER)
         if ai_text:
             text_to_show = self.strings(key).format(model_name, safe_prompt, text_page + 1, total_text_pages, utils.escape_html(current_text.strip()))
         else:
@@ -412,7 +435,6 @@ class ImageGenMod(loader.Module):
         kb = []
         total_imgs = len(s["images"])
         
-        # Image Nav
         if total_imgs > 1:
             nav_row = []
             nav_row.append({"text": "⬅️ Картинка", "callback": self._nav_gen_cb, "args": (sid, -1)})
@@ -420,7 +442,6 @@ class ImageGenMod(loader.Module):
             nav_row.append({"text": "Картинка ➡️", "callback": self._nav_gen_cb, "args": (sid, 1)})
             kb.append(nav_row)
         
-        # Text Nav
         if total_text_pages > 1:
              text_nav = []
              text_nav.append({"text": "📝 <", "callback": self._nav_text_cb, "args": (sid, -1)})
@@ -459,12 +480,10 @@ class ImageGenMod(loader.Module):
     async def _nav_text_cb(self, call: InlineCall, sid, direction):
         if sid not in self.sessions: return await call.answer("Expired")
         s = self.sessions[sid]
-        # Recalculate pages for current image index
         idx = s["index"]
         ai_text = s["images"][idx].get("text", "")
         chunk_size = 800
         total_pages = (len(ai_text) + chunk_size - 1) // chunk_size
-        
         new_page = s["text_page"] + direction
         if 0 <= new_page < total_pages:
             s["text_page"] = new_page
@@ -534,7 +553,8 @@ class ImageGenMod(loader.Module):
             async def answer(self, *args, **kwargs): pass
             async def delete(self): await self.message.delete()
         
-        await self._render_history_slide(FakeCall(msg), 0)
+        # Start with text_page=0
+        await self._render_history_slide(FakeCall(msg), 0, 0)
 
     async def _show_history_menu(self, target, page=0):
         history = self.db.get("ImageGen", "history", [])
@@ -558,7 +578,9 @@ class ImageGenMod(loader.Module):
                 p = e.get('prompt', '...')
                 prov = e.get("provider", "google")
                 is_edit = e.get("is_edit", False)
-                if is_edit: icon = "✏️"
+                # Icons
+                if not e.get("bytes") and not e.get("url"): icon = "📝" # Text Only
+                elif is_edit: icon = "✏️"
                 elif prov == "pollinations": icon = "💠"
                 else: icon = "🖼"
                 
@@ -586,27 +608,40 @@ class ImageGenMod(loader.Module):
     async def _start_slideshow(self, call: InlineCall):
         history = self.db.get("ImageGen", "history", [])
         if not history: return await call.answer("Empty")
-        await self._render_history_slide(call, 0)
+        await self._render_history_slide(call, 0, 0)
 
     async def _view_hist_item(self, call: InlineCall, item_id):
         history = self.db.get("ImageGen", "history", [])
         idx = next((i for i, x in enumerate(history) if x["id"] == item_id), -1)
         if idx == -1: return await call.answer("Not found")
-        await self._render_history_slide(call, idx)
+        await self._render_history_slide(call, idx, 0)
 
-    async def _render_history_slide(self, call: InlineCall, index):
+    async def _hist_nav_text(self, call: InlineCall, idx, direction, current_page):
+        # Callback for text pagination in history
+        new_page = current_page + direction
+        await self._render_history_slide(call, idx, new_page)
+
+    async def _render_history_slide(self, call: InlineCall, index, text_page=0):
         history = self.db.get("ImageGen", "history", [])
         if not history: return await self._show_history_menu(call)
         
         index = max(0, min(index, len(history) - 1))
         item = history[index]
+        
+        # Determine image source
         img_url = self.url_cache.get(item["id"])
         
+        # Check if URL stored in DB
+        if not img_url and item.get("url"):
+            img_url = item.get("url")
+            self.url_cache[item["id"]] = img_url
+            
+        # Check if Bytes stored (and no URL yet)
         if not img_url and item.get("bytes"):
             await call.edit(self.strings("uploading"), reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
             try:
                 img_bytes = base64.b64decode(item["bytes"])
-                img_url = await self._upload_image(img_bytes)
+                img_url = await self._upload_image(img_bytes, permanent=False)
                 if img_url: self.url_cache[item["id"]] = img_url
             except: pass
         
@@ -614,19 +649,39 @@ class ImageGenMod(loader.Module):
         ai_text = item.get("text_resp", "")
         model_name = item.get("model", "Неизвестно")
 
+        # Text Pagination Logic for History
+        chunk_size = 800
+        text_chunks = [ai_text[i:i+chunk_size] for i in range(0, len(ai_text), chunk_size)] if ai_text else []
+        total_text_pages = len(text_chunks)
+        if text_page >= total_text_pages: text_page = max(0, total_text_pages - 1)
+        if text_page < 0: text_page = 0
+        current_text = text_chunks[text_page] if text_chunks else ""
+
+        # Format Text
         if ai_text:
-            text_to_show = self.strings("history_item_text").format(index + 1, len(history), model_name, safe_prompt, utils.escape_html(ai_text.strip()))
+            text_to_show = self.strings("history_item_text").format(index + 1, len(history), model_name, safe_prompt, text_page + 1, total_text_pages, utils.escape_html(current_text.strip()))
         else:
             text_to_show = self.strings("history_item").format(index + 1, len(history), model_name, safe_prompt)
 
+        kb = []
+        
+        # Img Nav
         nav = []
         if index > 0:
             nav.append({"text": "⬅️", "callback": self._hist_nav, "args": (index - 1,)})
         nav.append({"text": f"{index + 1}/{len(history)}", "callback": self._dummy_cb})
         if index < len(history) - 1:
             nav.append({"text": "➡️", "callback": self._hist_nav, "args": (index + 1,)})
+        if nav: kb.append(nav)
 
-        kb = [nav]
+        # Text Nav
+        if total_text_pages > 1:
+             text_nav = []
+             text_nav.append({"text": "📝 <", "callback": self._hist_nav_text, "args": (index, -1, text_page)})
+             text_nav.append({"text": f"Стр {text_page + 1}/{total_text_pages}", "callback": self._dummy_cb})
+             text_nav.append({"text": "> 📝", "callback": self._hist_nav_text, "args": (index, 1, text_page)})
+             kb.append(text_nav)
+
         actions = []
         actions.append({"text": self.strings("btn_del_one"), "callback": self._del_one_cb, "args": (item['id'],)})
         prov = item.get("provider", "google")
@@ -635,6 +690,7 @@ class ImageGenMod(loader.Module):
         kb.append(actions)
         kb.append([{"text": self.strings("btn_close"), "callback": self._safe_close}])
         
+        # Smart edit: if no image, remove media
         await call.edit(
             text=text_to_show,
             photo=img_url,
@@ -643,7 +699,7 @@ class ImageGenMod(loader.Module):
         )
 
     async def _hist_nav(self, call: InlineCall, new_index):
-        await self._render_history_slide(call, new_index)
+        await self._render_history_slide(call, new_index, 0)
 
     async def _back_to_menu(self, call: InlineCall):
         await self._show_history_menu(call, 0)
@@ -661,7 +717,7 @@ class ImageGenMod(loader.Module):
         if not history: await self._show_history_menu(call)
         else:
             new_idx = idx if idx < len(history) else idx - 1
-            await self._render_history_slide(call, new_idx)
+            await self._render_history_slide(call, new_idx, 0)
 
     async def _regen_from_hist(self, call: InlineCall, prompt, provider):
         sid = str(uuid.uuid4())
