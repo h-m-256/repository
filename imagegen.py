@@ -1,6 +1,12 @@
+#        __                
+#       / /_     ____ ____ 
+#      / __ \   / __ `/ _ \
+#     / / / /  / /_/ /  __/
+#    /_/ /_/   \__,_/\___/ 
+#
 # meta developer: @h_m_256
-# написано с помощью ии ☃️
-# вайбкодинг захватит мир, вайбкоооодинг..
+#
+# поцаны вайбкодить имба, я сам вайбкодер
 import aiohttp
 import base64
 import uuid
@@ -9,6 +15,9 @@ import json
 import asyncio
 import io
 import random
+import textwrap
+import re
+import time
 from PIL import Image
 from .. import loader, utils
 from telethon.tl.types import Message
@@ -18,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 @loader.tds
 class ImageGenMod(loader.Module):
-    """Мультимодальный генератор изображений (Google Gemini + Pollinations)"""
+    """Генератор и редактор изображений с историей (опционально) с помощью моделей от google + pollinations (pollinations бесплатен, без ключа, модели pollinations не поддерживают редактирование)"""
 
     strings = {
         "name": "ImageGen",
@@ -27,35 +36,62 @@ class ImageGenMod(loader.Module):
         "model_pollinations": "Модель Pollinations (для .igp)",
         "quality": "Качество загружаемых фото (для .ig)",
         "prefix": "Префикс промпта (стиль и т.д.)",
-        "storage_mode": "Режим хранения истории (Base64=Тяжело, URL=Ссылки, None=Без истории)",
+        "storage_mode": "Режим хранения истории. 1. Base64 - надежно, но занимает много хранилища (размер бекапа юзербота может значительно увеличится). 2. URL - экономно, занимает мало хранилища, но не так надёжно, как первый вариант. 3. None - не сохранять историю",
         "history_limit": "Лимит записей в истории",
+        "custom_emojis": "Использовать premium эмодзи exteragram",
+        "use_quote": "Использовать форматирование цитат (blockquote)",
         
         # Генерация
-        "gen_new": "🎨 <b>Генерация...</b>\n<i>{}</i>\n🔮 <b>Модель:</b> {}",
-        "gen_var": "🎨 <b>Генерация нового варианта...</b>\n<i>{}</i>\n🔮 <b>Модель:</b> {}",
-        "success": "✅ <b>Готово!</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>",
-        "success_with_text": "✅ <b>Готово!</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>\n\n📜 <b>Ответ ИИ (Стр. {}/{}):</b>\n<blockquote expandable>{}</blockquote>",
+        "gen_new": '<blockquote><a href="tg://emoji?id=5431456208487716895">🎨</a> <b>Генерация...</b></blockquote>\n<blockquote expandable>📝 <b>Промпт:</b> <i>{}</i></blockquote>\n<blockquote><a href="tg://emoji?id=5361837567463399422">🔮</a> <b>Модель:</b> {}</blockquote>',
+        
+        "gen_var": '<blockquote><a href="tg://emoji?id=5431456208487716895">🎨</a> <b>Генерация (Новый вариант)...</b></blockquote>\n<blockquote expandable>📝 <b>Промпт:</b> <i>{}</i></blockquote>\n<blockquote><a href="tg://emoji?id=5361837567463399422">🔮</a> <b>Модель:</b> {}</blockquote>',
+        
+        "success": '<blockquote><a href="tg://emoji?id=5427009714745517609">✅</a> <b>Готово!</b></blockquote>\n<blockquote><a href="tg://emoji?id=5361837567463399422">🔮</a> <b>Модель:</b> {}</blockquote>\n<blockquote expandable>📝 <b>Промпт:</b> <i>{}</i></blockquote>',
+        
+        "success_with_text": '<blockquote><a href="tg://emoji?id=5427009714745517609">✅</a> <b>Готово!</b></blockquote>\n<blockquote><a href="tg://emoji?id=5361837567463399422">🔮</a> <b>Модель:</b> {}</blockquote>\n<blockquote expandable>📝 <b>Промпт:</b> <i>{}</i></blockquote>\n\n📜 <b>Ответ ИИ (Стр. {}/{}):</b>\n<blockquote expandable>{}</blockquote>',
         
         # Редактирование
-        "edit_new": "🎨 <b>Редактирование...</b>\n<i>{}</i>\n🔮 <b>Модель:</b> {}",
-        "edit_var": "🎨 <b>Редактирование (вариант)...</b>\n<i>{}</i>\n🔮 <b>Модель:</b> {}",
-        "edit_success": "🖼 <b>Изображение отредактировано!</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>",
-        "edit_success_text": "🖼 <b>Изображение отредактировано!</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>\n\n📜 <b>Ответ ИИ (Стр. {}/{}):</b>\n<blockquote expandable>{}</blockquote>",
-
-        # Только текст
-        "only_text_response": "⚠️ <b>Изображение не сгенерировано (только текст):</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>\n\n📜 <b>Ответ ИИ (Стр. {}/{}):</b>\n<blockquote expandable>{}</blockquote>",
-        "error_no_data": "❌ <b>Ошибка:</b> Данные не получены.\n🔮 <b>Модель:</b> {}\n<i>{}</i>",
-
-        "uploading": "📤 <b>Обработка и загрузка...</b>",
-        "error": "❌ <b>Ошибка:</b>\n<blockquote expandable>{}</blockquote>",
-        "history_empty": "❌ История пуста!",
-        "history_cleared": "✅ История очищена!",
-        "history_cleared_n": "✅ Удалено последних записей: {}",
-        "history_item": "🖼 <b>История [{}/{}]</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>",
-        "history_item_text": "🖼 <b>История [{}/{}]</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>\n\n<blockquote expandable>{}</blockquote>",
-        "history_text_only": "📝 <b>История (Текст) [{}/{}]</b>\n🔮 <b>Модель:</b> {}\n<i>{}</i>\n\n<blockquote expandable>{}</blockquote>",
+        "edit_new": '<blockquote><a href="tg://emoji?id=5431456208487716895">🎨</a> <b>Редактирование...</b></blockquote>\n<blockquote expandable>📝 <b>Промпт:</b> <i>{}</i></blockquote>\n<blockquote><a href="tg://emoji?id=5361837567463399422">🔮</a> <b>Модель:</b> {}</blockquote>',
         
-        "no_api": "❌ <b>Не установлен API ключ для Google!</b>",
+        "edit_var": '<blockquote><a href="tg://emoji?id=5431456208487716895">🎨</a> <b>Редактирование (Новый вариант)...</b></blockquote>\n<blockquote expandable>📝 <b>Промпт:</b> <i>{}</i></blockquote>\n<blockquote><a href="tg://emoji?id=5361837567463399422">🔮</a> <b>Модель:</b> {}</blockquote>',
+        
+        "edit_success": '<blockquote><a href="tg://emoji?id=5775949822993371030">🖼</a> <b>Изображение отредактировано!</b></blockquote>\n<blockquote><a href="tg://emoji?id=5361837567463399422">🔮</a> <b>Модель:</b> {}</blockquote>\n<blockquote expandable>📝 <b>Промпт:</b> <i>{}</i></blockquote>',
+        
+        "edit_success_text": '<blockquote><a href="tg://emoji?id=5775949822993371030">🖼</a> <b>Изображение отредактировано!</b></blockquote>\n<blockquote><a href="tg://emoji?id=5361837567463399422">🔮</a> <b>Модель:</b> {}</blockquote>\n<blockquote expandable>📝 <b>Промпт:</b> <i>{}</i></blockquote>\n\n📜 <b>Ответ ИИ (Стр. {}/{}):</b>\n<blockquote expandable>{}</blockquote>',
+
+        # Только текст / Ошибки
+        "only_text_response": '<blockquote><a href="tg://emoji?id=5420323339723881652">⚠️</a> <b>Изображение не сгенерировано (только текст):</b></blockquote>\n<blockquote><a href="tg://emoji?id=5361837567463399422">🔮</a> <b>Модель:</b> {}</blockquote>\n<blockquote expandable>📝 <b>Промпт:</b> <i>{}</i></blockquote>\n\n📜 <b>Ответ ИИ (Стр. {}/{}):</b>\n<blockquote expandable>{}</blockquote>',
+        
+        "error_no_data": '<blockquote><a href="tg://emoji?id=5210952531676504517">❌</a> <b>Ошибка:</b> Данные не получены.</blockquote>\n<blockquote><a href="tg://emoji?id=5361837567463399422">🔮</a> <b>Модель:</b> {}</blockquote>\n<blockquote expandable>📝 <b>Промпт:</b> <i>{}</i></blockquote>',
+
+        "uploading": '<blockquote><a href="tg://emoji?id=5433614747381538714">📤</a> <b>Обработка и загрузка...</b></blockquote>',
+        "uploading_wait": '<blockquote><a href="tg://emoji?id=5433614747381538714">📤</a> <b>Лимит хостинга. Ждем {}сек...</b></blockquote>',
+        
+        "error": '<blockquote><a href="tg://emoji?id=5210952531676504517">❌</a> <b>Ошибка:</b></blockquote>\n<blockquote expandable>{}</blockquote>',
+        
+        "error_censored": '<blockquote><a href="tg://emoji?id=5210952531676504517">❌</a> <b>Ошибка (Цензура):</b></blockquote>\n<blockquote expandable>{}</blockquote>\n<i>Попробуйте изменить запрос.</i>',
+        
+        "error_long": '<blockquote><a href="tg://emoji?id=5210952531676504517">❌</a> <b>Ошибка слишком длинная!</b></blockquote>\nСкачайте лог ниже.',
+        
+        # История
+        "history_empty": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>История пуста!</b>',
+        "history_disabled": '<blockquote><a href="tg://emoji?id=5420323339723881652">⚠️</a> <b>История выключена</b></blockquote>\nВключите <code>storage_mode</code> в <code>.cfg ImageGen</code>',
+        "history_disabled_warn": '\n\n<a href="tg://emoji?id=5420323339723881652">⚠️</a> <i>История выключена, новые записи сохраняться не будут.</i>',
+        
+        "history_cleared": '<a href="tg://emoji?id=5427009714745517609">✅</a> <b>История очищена!</b>',
+        "history_cleared_n": '<a href="tg://emoji?id=5427009714745517609">✅</a> <b>Удалено последних записей: {}</b>',
+        
+        "history_item": '<a href="tg://emoji?id=5775949822993371030">🖼</a> <b>История [{}/{}]</b>\n<blockquote><a href="tg://emoji?id=5361837567463399422">🔮</a> <b>Модель:</b> {}</blockquote>\n<blockquote expandable>📝 <b>Промпт:</b> <i>{}</i></blockquote>',
+        
+        "history_item_text": '<a href="tg://emoji?id=5775949822993371030">🖼</a> <b>История [{}/{}]</b>\n<blockquote><a href="tg://emoji?id=5361837567463399422">🔮</a> <b>Модель:</b> {}</blockquote>\n<blockquote expandable>📝 <b>Промпт:</b> <i>{}</i></blockquote>\n\n📜 <b>Ответ ИИ (Стр. {}/{}):</b>\n<blockquote expandable>{}</blockquote>',
+        
+        "history_text_only": '📝 <b>История (Текст) [{}/{}]</b>\n<blockquote><a href="tg://emoji?id=5361837567463399422">🔮</a> <b>Модель:</b> {}</blockquote>\n<blockquote expandable>📝 <b>Промпт:</b> <i>{}</i></blockquote>\n\n📜 <b>Ответ ИИ (Стр. {}/{}):</b>\n<blockquote expandable>{}</blockquote>',
+        
+        "img_load_fail": "\n\n⚠️ <b>Ошибка:</b> Изображение недоступно (ссылка истекла или невалидна).",
+        
+        "no_api": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>Не установлен API ключ для Google!</b>',
+        
+        # Кнопки (Обычные эмодзи)
         "btn_regen": "🔄 Еще вариант",
         "btn_back": "🔙 Меню",
         "btn_list": "📂 Список",
@@ -65,12 +101,12 @@ class ImageGenMod(loader.Module):
         "btn_loading": "🕘",
         "btn_slideshow": "🎞 Галерея",
         "btn_log": "📥 Лог в Избранное",
-        "log_caption": "📄 <b>Полный лог ошибки ImageGen</b>",
+        "log_caption": '<a href="tg://emoji?id=5956561916573782596">📄</a> <b>Полный лог ошибки ImageGen</b>',
         "btn_back_hist": "🔙 В историю",
         "btn_model": "⚙️ Модель",
-        "select_model": "⚙️ <b>Выберите модель для перегенерации:</b>",
-        "model_hidden_warn": "\n\n⚠️ <i>Модели Pollinations скрыты, так как они не поддерживают редактирование изображений.</i>",
-        "arg_err": "❌ Аргумент должен быть числом > 0",
+        "select_model": '<blockquote><a href="tg://emoji?id=5341715473882955310">⚙️</a> <b>Выберите модель для перегенерации:</b></blockquote>',
+        "model_hidden_warn": '\n\n<a href="tg://emoji?id=5420323339723881652">⚠️</a> <i>Модели Pollinations скрыты, так как они не поддерживают редактирование изображений.</i>',
+        "arg_err": '<a href="tg://emoji?id=5210952531676504517">❌</a> <b>Аргумент должен быть числом > 0</b>',
     }
 
     def __init__(self):
@@ -85,18 +121,31 @@ class ImageGenMod(loader.Module):
             loader.ConfigValue("model_pollinations", "flux", lambda: self.strings("model_pollinations"), validator=loader.validators.Choice([
                 "flux", "turbo", "midjourney", "deliberate"
             ])),
-            loader.ConfigValue("storage_mode", "Base64", lambda: self.strings("storage_mode"), validator=loader.validators.Choice(["Base64", "URL", "None"])),
+            loader.ConfigValue("storage_mode", "None", lambda: self.strings("storage_mode"), validator=loader.validators.Choice(["Base64", "URL", "None"])),
             loader.ConfigValue("history_limit", 20, lambda: self.strings("history_limit"), validator=loader.validators.Integer(minimum=1)),
             loader.ConfigValue("quality", "Low", lambda: self.strings("quality"), validator=loader.validators.Choice(["Low", "Medium", "High", "Original"])),
             loader.ConfigValue("prefix", "", lambda: self.strings("prefix")),
+            loader.ConfigValue("custom_emojis", True, lambda: self.strings("custom_emojis"), validator=loader.validators.Boolean()),
+            loader.ConfigValue("use_quote", True, lambda: self.strings("use_quote"), validator=loader.validators.Boolean()),
         )
         self.sessions = {}
         self.url_cache = {}
         self.error_cache = {}
+        self._upload_lock = asyncio.Lock()
+        self._last_up_time = 0
 
     async def client_ready(self, client, db):
         self._client = client
         self.db = db
+
+    def _get_str(self, key, *args):
+        text = self.strings(key).format(*args)
+        if not self.config["custom_emojis"]:
+            text = re.sub(r'<a href="tg://emoji\?id=\d+">(.+?)</a>', r'\1', text)
+        if not self.config["use_quote"]:
+            text = text.replace("<blockquote>", "").replace("</blockquote>", "")
+            text = text.replace("<blockquote expandable>", "")
+        return text
 
     def _resize_image(self, img_bytes):
         setting = self.config["quality"]
@@ -112,68 +161,103 @@ class ImageGenMod(loader.Module):
             return out.getvalue()
         except: return img_bytes
 
+    def _smart_split(self, text, limit=800):
+        if not text: return []
+        chunks = []
+        current_chunk = ""
+        for word in text.split(' '):
+            if len(current_chunk) + len(word) < limit:
+                current_chunk += word + " "
+            else:
+                chunks.append(current_chunk)
+                current_chunk = word + " "
+        if current_chunk: chunks.append(current_chunk)
+        return chunks
+
     # --- UPLOADERS ---
     
-    async def _up_telegraph(self, session, img_bytes):
-        # Telegraph upload logic
-        try:
-            data = aiohttp.FormData()
-            data.add_field('file', img_bytes, filename='file.jpg', content_type='image/jpeg')
-            async with session.post('https://telegra.ph/upload', data=data, timeout=15) as resp:
-                if resp.status == 200:
-                    res = await resp.json()
-                    return "https://telegra.ph" + res[0]["src"]
-        except: pass
-        return None
-
     async def _up_x0(self, session, img_bytes):
         data = aiohttp.FormData()
         data.add_field('file', img_bytes, filename='image.png', content_type='image/png')
-        async with session.post('https://x0.at', data=data, timeout=15) as resp:
-            if resp.status == 200: return await resp.text()
+        try:
+            async with session.post('https://x0.at', data=data, timeout=30) as resp:
+                if resp.status == 200: return await resp.text()
+        except: pass
         return None
 
     async def _up_tmpfiles(self, session, img_bytes):
         data = aiohttp.FormData()
         data.add_field('file', img_bytes, filename='image.jpg', content_type='image/jpeg')
-        async with session.post('https://tmpfiles.org/api/v1/upload', data=data, timeout=15) as resp:
-            if resp.status == 200:
-                res = await resp.json()
-                url = res['data']['url']
-                return url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
+        try:
+            async with session.post('https://tmpfiles.org/api/v1/upload', data=data, timeout=30) as resp:
+                if resp.status == 200:
+                    res = await resp.json()
+                    url = res['data']['url']
+                    return url.replace("tmpfiles.org/", "tmpfiles.org/dl/")
+        except: pass
         return None
 
     async def _up_catbox(self, session, img_bytes):
         data = aiohttp.FormData()
         data.add_field('reqtype', 'fileupload')
         data.add_field('fileToUpload', img_bytes, filename='image.png', content_type='image/png')
-        async with session.post('https://catbox.moe/user/api.php', data=data, timeout=15) as resp:
-            if resp.status == 200: return await resp.text()
+        try:
+            async with session.post('https://catbox.moe/user/api.php', data=data, timeout=60) as resp:
+                if resp.status == 200:
+                    return await resp.text()
+                else:
+                    logger.error(f"Catbox Error: {resp.status} - {await resp.text()}")
+        except Exception as e:
+            logger.error(f"Catbox Exception: {e}")
         return None
 
     async def _up_0x0(self, session, img_bytes):
         data = aiohttp.FormData()
         data.add_field('file', img_bytes, filename='image.png', content_type='image/png')
-        async with session.post('https://0x0.st', data=data, timeout=15) as resp:
-            if resp.status == 200: return await resp.text()
+        try:
+            async with session.post('https://0x0.st', data=data, timeout=30) as resp:
+                if resp.status == 200: return await resp.text()
+        except: pass
         return None
 
-    async def _upload_image(self, img_bytes, permanent=False):
-        async with aiohttp.ClientSession() as session:
-            # Приоритеты
+    async def _upload_image(self, img_bytes, permanent=False, target=None):
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            
+            # Если это постоянная загрузка (URL режим) - используем лок и таймер
             if permanent:
-                # Для хранения ссылок (URL mode): Telegraph -> Catbox -> x0
-                queue = [self._up_telegraph, self._up_catbox, self._up_x0, self._up_tmpfiles]
+                async with self._upload_lock:
+                    now = time.time()
+                    diff = now - self._last_up_time
+                    if diff < 15:
+                        wait_time = 15 - diff
+                        if target:
+                            # Уведомляем пользователя
+                            try:
+                                await target.edit(self._get_str("uploading_wait", int(wait_time+1)), reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
+                            except: pass
+                        await asyncio.sleep(wait_time)
+                    
+                    self._last_up_time = time.time()
+                    
+                    # URL Mode Order
+                    queue = [self._up_catbox, self._up_0x0, self._up_x0]
+                    for uploader in queue:
+                        try:
+                            url = await uploader(session, img_bytes)
+                            if url and url.startswith("http"): return url.strip()
+                        except: continue
+                    return None # Failed all permanent
+            
             else:
-                # Для временного отображения: Telegraph -> x0 -> Tmpfiles
-                queue = [self._up_telegraph, self._up_x0, self._up_tmpfiles, self._up_0x0]
-                
-            for uploader in queue:
-                try:
-                    url = await uploader(session, img_bytes)
-                    if url and url.startswith("http"): return url.strip()
-                except: continue
-            return None
+                # Temporary Mode (Fast, no lock)
+                queue = [self._up_x0, self._up_tmpfiles, self._up_catbox, self._up_0x0]
+                for uploader in queue:
+                    try:
+                        url = await uploader(session, img_bytes)
+                        if url and url.startswith("http"): return url.strip()
+                    except: continue
+                return None
 
     # --- APIs ---
     async def _call_google(self, model_name: str, prompt: str, input_image_bytes=None):
@@ -225,14 +309,14 @@ class ImageGenMod(loader.Module):
 
     # --- COMMANDS ---
 
-    @loader.command(ru_doc="<промпт> [реплай на фото] - Генерация через Google (Gemini/Imagen)")
+    @loader.command(ru_doc="<промпт> [реплай на фото] - Генерация или редактирование через модели Google (Gemini Image или же Nano banana)")
     async def ig(self, message: Message):
         """Generate via Google (Gemini)"""
         await self._init_gen(message, provider="google")
 
-    @loader.command(ru_doc="<промпт> - Генерация через Pollinations (Free, Flux/SDXL)")
+    @loader.command(ru_doc="<промпт> - Генерация через Pollinations")
     async def igp(self, message: Message):
-        """Generate via Pollinations (Free)"""
+        """Generate via Pollinations"""
         await self._init_gen(message, provider="pollinations")
 
     @loader.command(ru_doc="[N] - Очистить историю (все или N последних)")
@@ -241,29 +325,29 @@ class ImageGenMod(loader.Module):
         args = utils.get_args_raw(message)
         history = self.db.get("ImageGen", "history", [])
         
-        if not history: return await utils.answer(message, self.strings("history_empty"))
+        if not history: return await utils.answer(message, self._get_str("history_empty"))
 
         if not args:
             self.db.set("ImageGen", "history", [])
             self.url_cache.clear()
-            return await utils.answer(message, self.strings("history_cleared"))
+            return await utils.answer(message, self._get_str("history_cleared"))
         
         try:
             n = int(args)
             if n <= 0: raise ValueError
         except:
-            return await utils.answer(message, self.strings("arg_err"))
+            return await utils.answer(message, self._get_str("arg_err"))
         
         new_history = history[:-n]
         self.db.set("ImageGen", "history", new_history)
-        await utils.answer(message, self.strings("history_cleared_n").format(n))
+        await utils.answer(message, self._get_str("history_cleared_n", n))
 
     async def _init_gen(self, message, provider):
         args = utils.get_args_raw(message)
         if not args and not self.config["prefix"]: return await utils.answer(message, "Введите промпт")
         
         if provider == "google" and not self.config["api_key"]:
-            return await utils.answer(message, self.strings("no_api"))
+            return await utils.answer(message, self._get_str("no_api"))
         
         user_prompt = args.strip() if args.strip() else "..."
         full_prompt = (self.config["prefix"] + " " + args).strip()
@@ -282,7 +366,7 @@ class ImageGenMod(loader.Module):
         status_key = "edit_new" if input_bytes else "gen_new"
 
         msg = await self.inline.form(
-            text=self.strings(status_key).format(utils.escape_html(user_prompt), model_name),
+            text=self._get_str(status_key, utils.escape_html(user_prompt), model_name),
             message=message,
             reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]]
         )
@@ -334,33 +418,40 @@ class ImageGenMod(loader.Module):
                 img_bytes = data
             
             # --- Saving Logic ---
-            storage = self.config["storage_mode"]
+            storage = str(self.config["storage_mode"])
             hist_id = str(uuid.uuid4())
             
-            # Variables for session and DB
             db_b64 = None
             db_url = None
             display_url = None
             
             if hasattr(target, "edit"):
-                await target.edit(self.strings("uploading"), reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
+                await target.edit(self._get_str("uploading"), reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
 
-            # 1. URL Mode (Storage)
+            # 1. URL Mode (Try Permanent)
             if storage == "URL" and img_bytes:
-                db_url = await self._upload_image(img_bytes, permanent=True)
-                display_url = db_url 
+                db_url = await self._upload_image(img_bytes, permanent=True, target=target)
+                if db_url:
+                    display_url = db_url 
+                else:
+                    # FALLBACK: If perm upload failed, convert to Base64 mode logic for this item
+                    # to prevent losing the image in history
+                    db_b64 = base64.b64encode(img_bytes).decode('utf-8')
+                    # Try uploading to temp for display
+                    display_url = await self._upload_image(img_bytes, permanent=False)
             
-            # 2. Base64 Mode (Storage)
-            if storage == "Base64" and img_bytes:
+            # 2. Base64 Mode
+            elif storage == "Base64" and img_bytes:
                 db_b64 = base64.b64encode(img_bytes).decode('utf-8')
                 display_url = await self._upload_image(img_bytes, permanent=False)
 
-            # 3. None Mode OR Fallback (Display Only)
+            # 3. None Mode / Fallback
             if not display_url and img_bytes:
-                # Даже если режим None, загружаем для показа
                 display_url = await self._upload_image(img_bytes, permanent=False)
+            
+            if not display_url and not img_bytes:
+                display_url = "https://raw.githubusercontent.com/h-m-256/repository/refs/heads/main/media/empty.png"
 
-            # Save to DB (Only if NOT None)
             if storage != "None":
                 history = self.db.get("ImageGen", "history", [])
                 history.append({
@@ -388,12 +479,17 @@ class ImageGenMod(loader.Module):
         except Exception as e:
             error_text = str(e)
             kb = []
-            text_to_show = self.strings("error").format(utils.escape_html(error_text))
+            
+            censor_keys = ["block reason", "prohibited content", "violated Google's"]
+            if any(k in error_text for k in censor_keys):
+                text_to_show = self._get_str("error_censored", utils.escape_html(error_text))
+            else:
+                text_to_show = self._get_str("error", utils.escape_html(error_text))
             
             if len(error_text) > 1000:
                 err_id = str(uuid.uuid4())
                 self.error_cache[err_id] = error_text
-                text_to_show = self.strings("error_long")
+                text_to_show = self._get_str("error_long")
                 kb.append([{"text": self.strings("btn_log"), "callback": self._dl_error, "args": (err_id,)}])
 
             kb.append([{"text": self.strings("btn_regen"), "callback": self._regen_cb, "args": (sid,)}])
@@ -410,7 +506,7 @@ class ImageGenMod(loader.Module):
         file = io.BytesIO(content.encode('utf-8'))
         file.name = "error_log.txt"
         try:
-            await self._client.send_file("me", file, caption=self.strings("log_caption"))
+            await self._client.send_file("me", file, caption=self._get_str("log_caption"))
             await call.answer("Лог отправлен в Избранное!")
         except Exception as e: await call.answer(f"Failed: {e}", show_alert=True)
 
@@ -426,46 +522,38 @@ class ImageGenMod(loader.Module):
         model_name = s.get("model", "Unknown")
         is_edit = s.get("input_img") is not None
         
-        # Pagination Logic
         text_page = s.get("text_page", 0)
         chunk_size = 800
-        text_chunks = [ai_text[i:i+chunk_size] for i in range(0, len(ai_text), chunk_size)] if ai_text else []
+        text_chunks = self._smart_split(ai_text, 800)
         total_text_pages = len(text_chunks)
         if text_page >= total_text_pages: text_page = max(0, total_text_pages - 1)
         s["text_page"] = text_page
         current_text = text_chunks[text_page] if text_chunks else ""
         
-        # Key Selection & Formatting
-        if img_url:
+        is_empty_img = "empty.png" in str(img_url)
+
+        if not is_empty_img:
             if is_edit: key = "edit_success_text" if ai_text else "edit_success"
             else: key = "success_with_text" if ai_text else "success"
-            
-            if ai_text:
-                text_to_show = self.strings(key).format(model_name, safe_prompt, text_page + 1, total_text_pages, utils.escape_html(current_text.strip()))
-            else:
-                text_to_show = self.strings(key).format(model_name, safe_prompt)
         else:
-            # No image
-            if ai_text:
-                key = "only_text_response"
-                text_to_show = self.strings(key).format(model_name, safe_prompt, text_page + 1, total_text_pages, utils.escape_html(current_text.strip()))
-            else:
-                # No image AND No text -> Error or Fallback
-                key = "error_no_data"
-                text_to_show = self.strings(key).format(model_name, safe_prompt)
+            if ai_text: key = "only_text_response"
+            else: key = "error_no_data"
+
+        if ai_text:
+            text_to_show = self._get_str(key, model_name, safe_prompt, text_page + 1, total_text_pages, utils.escape_html(current_text.strip()))
+        else:
+             text_to_show = self._get_str(key, model_name, safe_prompt)
         
         kb = []
         total_imgs = len(s["images"])
         
-        # Image Nav
         if total_imgs > 1:
             nav_row = []
-            nav_row.append({"text": "⬅️ Картинка", "callback": self._nav_gen_cb, "args": (sid, -1)})
+            nav_row.append({"text": "⬅️ Вариант", "callback": self._nav_gen_cb, "args": (sid, -1)})
             nav_row.append({"text": f"{idx + 1}/{total_imgs}", "callback": self._dummy_cb})
-            nav_row.append({"text": "Картинка ➡️", "callback": self._nav_gen_cb, "args": (sid, 1)})
+            nav_row.append({"text": "Вариант ➡️", "callback": self._nav_gen_cb, "args": (sid, 1)})
             kb.append(nav_row)
         
-        # Text Nav
         if total_text_pages > 1:
              text_nav = []
              text_nav.append({"text": "📝 <", "callback": self._nav_text_cb, "args": (sid, -1)})
@@ -483,12 +571,23 @@ class ImageGenMod(loader.Module):
         
         kb.append([{"text": self.strings("btn_close"), "callback": self._safe_close}])
 
-        await target.edit(
-            text=text_to_show,
-            photo=img_url,
-            reply_markup=kb,
-            file=None if not img_url else None
-        )
+        try:
+            await target.edit(
+                text=text_to_show,
+                photo=img_url,
+                reply_markup=kb,
+                file=None if not img_url else None
+            )
+        except Exception as e:
+            if "WebpageCurlFailed" in str(e) or "MediaCaptionTooLong" in str(e):
+                error_msg = self.strings("img_load_fail")
+                await target.edit(
+                    text=text_to_show + error_msg,
+                    reply_markup=kb,
+                    file=None
+                )
+            else:
+                await target.edit(text=f"Render Error: {e}", reply_markup=kb)
 
     # --- NAV HANDLERS ---
     async def _nav_gen_cb(self, call: InlineCall, sid, direction):
@@ -506,8 +605,10 @@ class ImageGenMod(loader.Module):
         s = self.sessions[sid]
         idx = s["index"]
         ai_text = s["images"][idx].get("text", "")
-        chunk_size = 800
-        total_pages = (len(ai_text) + chunk_size - 1) // chunk_size
+        
+        text_chunks = self._smart_split(ai_text, 800)
+        total_pages = len(text_chunks)
+        
         new_page = s["text_page"] + direction
         if 0 <= new_page < total_pages:
             s["text_page"] = new_page
@@ -526,7 +627,7 @@ class ImageGenMod(loader.Module):
             [{"text": "⚡️ Gemini 2.5 Flash", "callback": self._set_model_cb, "args": (sid, "gemini-2.5-flash-image", "google")}]
         ]
         
-        text_msg = self.strings("select_model")
+        text_msg = self._get_str("select_model")
         
         if not is_edit_mode:
             kb.extend([
@@ -536,7 +637,7 @@ class ImageGenMod(loader.Module):
                 [{"text": "🎭 Deliberate (Pollinations)", "callback": self._set_model_cb, "args": (sid, "deliberate", "pollinations")}]
             ])
         else:
-            text_msg += self.strings("model_hidden_warn")
+            text_msg += self._get_str("model_hidden_warn")
             
         kb.append([{"text": "🔙 Назад", "callback": self._back_to_gen, "args": (sid,)}])
         await call.edit(text=text_msg, reply_markup=kb)
@@ -557,7 +658,7 @@ class ImageGenMod(loader.Module):
         status_key = "edit_var" if s.get("input_img") else "gen_var"
         await call.answer(f"Генерация ({s['model']})...")
         await call.edit(
-            self.strings(status_key).format(utils.escape_html(s["display_prompt"]), s["model"]), 
+            self._get_str(status_key, utils.escape_html(s["display_prompt"]), s["model"]), 
             reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]]
         )
         await self._process_gen(call, sid)
@@ -567,9 +668,14 @@ class ImageGenMod(loader.Module):
     async def ighist(self, message: Message):
         """View history"""
         history = self.db.get("ImageGen", "history", [])
-        if not history: return await utils.answer(message, self.strings("history_empty"))
+        storage = str(self.config["storage_mode"])
         
-        msg = await self.inline.form(self.strings("uploading"), message=message, reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
+        if not history: 
+            if storage == "None":
+                return await utils.answer(message, self._get_str("history_disabled"))
+            return await utils.answer(message, self._get_str("history_empty"))
+        
+        msg = await self.inline.form(self._get_str("uploading"), message=message, reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
         
         class FakeCall:
             def __init__(self, msg): self.message = msg
@@ -581,7 +687,11 @@ class ImageGenMod(loader.Module):
 
     async def _show_history_menu(self, target, page=0):
         history = self.db.get("ImageGen", "history", [])
-        text = self.strings("history_empty") if not history else "<b>📝 История генераций:</b>"
+        text = self._get_str("history_empty") if not history else "<b>📝 История генераций:</b>"
+        
+        if str(self.config["storage_mode"]) == "None":
+            text += self._get_str("history_disabled_warn")
+
         list_img = "https://raw.githubusercontent.com/h-m-256/repository/refs/heads/main/media/list_mode.png"
         
         kb = []
@@ -601,8 +711,7 @@ class ImageGenMod(loader.Module):
                 p = e.get('prompt', '...')
                 prov = e.get("provider", "google")
                 is_edit = e.get("is_edit", False)
-                # Icons
-                if not e.get("bytes") and not e.get("url"): icon = "📝" # Text Only
+                if not e.get("bytes") and not e.get("url"): icon = "📝"
                 elif is_edit: icon = "✏️"
                 elif prov == "pollinations": icon = "💠"
                 else: icon = "🖼"
@@ -657,44 +766,43 @@ class ImageGenMod(loader.Module):
             self.url_cache[item["id"]] = img_url
             
         if not img_url and item.get("bytes"):
-            await call.edit(self.strings("uploading"), reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
+            await call.edit(self._get_str("uploading"), reply_markup=[[{"text": self.strings("btn_loading"), "callback": self._dummy_cb}]])
             try:
                 img_bytes = base64.b64decode(item["bytes"])
-                # Загружаем временно
                 img_url = await self._upload_image(img_bytes, permanent=False)
                 if img_url: self.url_cache[item["id"]] = img_url
             except: pass
         
+        if not img_url and not item.get("bytes"):
+             img_url = "https://raw.githubusercontent.com/h-m-256/repository/refs/heads/main/media/empty.png"
+        
+        is_empty = "empty.png" in str(img_url)
         safe_prompt = utils.escape_html(item.get('prompt', 'image'))
         ai_text = item.get("text_resp", "")
         model_name = item.get("model", "Неизвестно")
 
-        chunk_size = 800
-        text_chunks = [ai_text[i:i+chunk_size] for i in range(0, len(ai_text), chunk_size)] if ai_text else []
+        text_chunks = self._smart_split(ai_text, 800)
         total_text_pages = len(text_chunks)
         if text_page >= total_text_pages: text_page = max(0, total_text_pages - 1)
         if text_page < 0: text_page = 0
         current_text = text_chunks[text_page] if text_chunks else ""
 
-        # Formatting Logic
-        if img_url:
+        if not is_empty:
             if ai_text:
-                text_to_show = self.strings("history_item_text").format(index + 1, len(history), model_name, safe_prompt, text_page + 1, total_text_pages, utils.escape_html(current_text.strip()))
+                text_to_show = self._get_str("history_item_text", index + 1, len(history), model_name, safe_prompt, text_page + 1, total_text_pages, utils.escape_html(current_text.strip()))
             else:
-                text_to_show = self.strings("history_item").format(index + 1, len(history), model_name, safe_prompt)
+                text_to_show = self._get_str("history_item", index + 1, len(history), model_name, safe_prompt)
         else:
-            # Text Only
-            text_to_show = self.strings("history_text_only").format(index + 1, len(history), model_name, safe_prompt, utils.escape_html(current_text.strip()))
+            text_to_show = self._get_str("history_text_only", index + 1, len(history), model_name, safe_prompt, text_page + 1, total_text_pages, utils.escape_html(current_text.strip()))
 
         kb = []
         
-        nav = []
-        if index > 0:
+        if len(history) > 1:
+            nav = []
             nav.append({"text": "⬅️", "callback": self._hist_nav, "args": (index - 1,)})
-        nav.append({"text": f"{index + 1}/{len(history)}", "callback": self._dummy_cb})
-        if index < len(history) - 1:
+            nav.append({"text": f"{index + 1}/{len(history)}", "callback": self._dummy_cb})
             nav.append({"text": "➡️", "callback": self._hist_nav, "args": (index + 1,)})
-        if nav: kb.append(nav)
+            if nav: kb.append(nav)
 
         if total_text_pages > 1:
              text_nav = []
@@ -711,12 +819,23 @@ class ImageGenMod(loader.Module):
         kb.append(actions)
         kb.append([{"text": self.strings("btn_close"), "callback": self._safe_close}])
         
-        await call.edit(
-            text=text_to_show,
-            photo=img_url,
-            reply_markup=kb,
-            file=None if not img_url else None
-        )
+        try:
+            await call.edit(
+                text=text_to_show,
+                photo=img_url,
+                reply_markup=kb,
+                file=None if not img_url else None
+            )
+        except Exception as e:
+            if "WebpageCurlFailed" in str(e) or "MediaCaptionTooLong" in str(e):
+                error_msg = self.strings("img_load_fail")
+                await call.edit(
+                    text=text_to_show + error_msg,
+                    reply_markup=kb,
+                    file=None
+                )
+            else:
+                await call.answer(f"Render Error: {e}", show_alert=True)
 
     async def _hist_nav(self, call: InlineCall, new_index):
         await self._render_history_slide(call, new_index, 0)
