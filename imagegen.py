@@ -10,7 +10,7 @@
 # requires: google-genai aiohttp-socks
 # full vibecode (gavno)
 # meta banner: https://raw.githubusercontent.com/h-m-256/repository/main/media/banner.jpg
-# meta fhsdesc: порно, nsfw, генерация, grok, gemini, gptimage
+# meta fhsdesc: порно, nsfw, генерация, grok, gemini, gptimage, ai, ии
 #
 # ----------------------
 
